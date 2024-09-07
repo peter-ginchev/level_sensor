@@ -69,7 +69,7 @@ void loop() {
   else if (mm > 10000)
   {
     // above max
-    snprintf(output, 9, "10.0 m");
+    snprintf(output, 9, "10.00m");
   }
   else if (mm < 1000)
   {
@@ -79,7 +79,7 @@ void loop() {
   else
   {
     // above a meter, show in m
-    snprintf(output, 9, "%2d.%1d m", mm / 100, (mm/10) % 10);
+    snprintf(output, 9, "%2d.%02dm", mm / 1000, (mm/10) % 100);
   }
 
   if (secs_till_last_log == 0 && connected)
