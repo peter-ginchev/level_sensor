@@ -50,9 +50,11 @@ void setup() {
 // loop() runs over and over again, as quickly as it can execute.
 void loop() {
   int zero_value = 6425;
-  int mm_inc_nom = 5;
-  int mm_inc_denom = 2;
+  int mm_inc_nom = 643;
+  int mm_inc_denom = 250;
   static int secs_till_last_log = 0;
+  bool transmitted = false;
+  bool connected = Particle.connected();
 
   short adc0 = ads.readADC_SingleEnded(0);
   int zero_based = adc0 - zero_value;
@@ -61,23 +63,45 @@ void loop() {
   char output[10] = {};
   if (mm < 0)
   {
-    snprintf(output, 9, "---- cm");
+    // below zero
+    snprintf(output, 9, " 0.0cm");
+  }
+  else if (mm > 10000)
+  {
+    // above max
+    snprintf(output, 9, "10.0 m");
+  }
+  else if (mm < 1000)
+  {
+    // under a meter, show in cm
+    snprintf(output, 9, "%2d.%1dcm", mm / 10, mm % 10);
   }
   else
   {
-    snprintf(output, 9, "%3d.%1dcm", mm / 10, mm % 10);
+    // above a meter, show in m
+    snprintf(output, 9, "%2d.%1d m", mm / 100, (mm/10) % 10);
   }
 
-  if (secs_till_last_log == 0)
+  if (secs_till_last_log == 0 && connected)
   {
     char str_mm[10] = {};
+    char str_raw[10] = {};
+
     snprintf(str_mm, 9, "%d", mm);
-    Particle.publish("depth", str_mm);
+    snprintf(str_raw, 9, "%d", adc0);
+
+    transmitted = Particle.publish("depth_mm", str_mm);
+    Particle.publish("raw_16bit", str_raw);
   }
 
   display.clearDisplay();
   display.setCursor(0,10);
   display.println(output);
+  if (transmitted)
+    display.println("v");
+  else if (!connected)
+    display.println("x");
+
   display.display();
 
   // reset counter after a minute, publish only then
