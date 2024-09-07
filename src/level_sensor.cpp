@@ -10,7 +10,6 @@
 #include "Particle.h"
 
 #include <Wire.h>
-#include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_ADS1X15.h>
 
@@ -41,8 +40,7 @@ void setup() {
   ads.setGain(GAIN_TWO);
   ads.begin();
 
-  // by default, we'll generate the high voltage from the 3.3v line internally! (neat!)
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);  // initialize with the I2C addr 0x3C (for the 128x64)
+  display.begin();
   display.setTextColor(WHITE);
   display.setTextSize(3);
 }
