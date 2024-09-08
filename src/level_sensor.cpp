@@ -16,10 +16,11 @@
 #define OLED_RESET -1
 Adafruit_SSD1306 display(OLED_RESET);
 
-#define NUMFLAKES 10
-#define XPOS 0
-#define YPOS 1
-#define DELTAY 2
+// There are 2 probe reads per sec, every minute transmission
+#define CYCLES_TRANSMIT_SECS 60
+
+// Delay between probes
+#define DELAY_MS 500
 
 // Let Device OS manage the connection to the Particle Cloud
 SYSTEM_MODE(AUTOMATIC);
@@ -51,12 +52,19 @@ void loop() {
   int mm_inc_nom = 643;
   int mm_inc_denom = 250;
   static int secs_till_last_log = 0;
+  static long sum_mm = 0;
+  static time32_t last_sent = Time.now();
+
   bool transmitted = false;
   bool connected = Particle.connected();
 
   short adc0 = ads.readADC_SingleEnded(0);
   int zero_based = adc0 - zero_value;
   int mm = (zero_based*mm_inc_denom)/mm_inc_nom;
+  sum_mm += mm;
+  secs_till_last_log++;
+
+  unsigned long long millis = System.millis();
 
   char output[10] = {};
   if (mm < 0)
@@ -80,16 +88,25 @@ void loop() {
     snprintf(output, 9, "%2d.%02dm", mm / 1000, (mm/10) % 100);
   }
 
-  if (secs_till_last_log == 0 && connected)
+  if (Time.now() >= last_sent + CYCLES_TRANSMIT_SECS)
   {
-    char str_mm[10] = {};
-    char str_raw[10] = {};
+    if (connected)
+    {
+      char str_mm[10] = {};
+      char str_raw[10] = {};
 
-    snprintf(str_mm, 9, "%d", mm);
-    snprintf(str_raw, 9, "%d", adc0);
+      int average_mm = sum_mm / secs_till_last_log;
+      snprintf(str_mm, 9, "%d", average_mm);
+      snprintf(str_raw, 9, "%d", adc0);
 
-    transmitted = Particle.publish("depth_mm", str_mm);
-    Particle.publish("raw_16bit", str_raw);
+      transmitted = Particle.publish("depth_mm", str_mm);
+      Particle.publish("raw_16bit", str_raw);
+    }
+
+    // reset counter after a minute, publish only then, but only if connected
+    secs_till_last_log = 0;
+    sum_mm = 0;
+    last_sent = Time.now();
   }
 
   display.clearDisplay();
@@ -102,9 +119,7 @@ void loop() {
 
   display.display();
 
-  // reset counter after a minute, publish only then
-  if (++secs_till_last_log == 120)
-    secs_till_last_log = 0;
-
-  delay( 500 ); // milliseconds and blocking - see docs for more info!
+  unsigned long long millis_diff = System.millis() + millis;
+  if (millis_diff < DELAY_MS)
+    delay(DELAY_MS - millis_diff); // milliseconds and blocking - see docs for more info!
 }
