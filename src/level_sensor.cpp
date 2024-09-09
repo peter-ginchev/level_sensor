@@ -9,6 +9,8 @@
 // Include Particle Device OS APIs
 #include "Particle.h"
 
+PRODUCT_VERSION(1);
+
 #include <Wire.h>
 
 // OLED Display
