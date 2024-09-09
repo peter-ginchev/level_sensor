@@ -10,7 +10,11 @@
 #include "Particle.h"
 
 #include <Wire.h>
+
+// OLED Display
 #include <Adafruit_SSD1306.h>
+
+// ADC Ti ADS1115, used in NCD PR33-8
 #include <Adafruit_ADS1X15.h>
 
 #define OLED_RESET -1
@@ -51,9 +55,11 @@ void loop() {
   int zero_value = 6425;
   int mm_inc_nom = 643;
   int mm_inc_denom = 250;
-  static int secs_till_last_log = 0;
+  static int samples_count = 0;
   static long sum_mm = 0;
   static time32_t last_sent = Time.now();
+
+  unsigned long long millis = System.millis();
 
   bool transmitted = false;
   bool connected = Particle.connected();
@@ -62,9 +68,7 @@ void loop() {
   int zero_based = adc0 - zero_value;
   int mm = (zero_based*mm_inc_denom)/mm_inc_nom;
   sum_mm += mm;
-  secs_till_last_log++;
-
-  unsigned long long millis = System.millis();
+  samples_count++;
 
   char output[10] = {};
   if (mm < 0)
@@ -95,7 +99,7 @@ void loop() {
       char str_mm[10] = {};
       char str_raw[10] = {};
 
-      int average_mm = sum_mm / secs_till_last_log;
+      int average_mm = sum_mm / samples_count;
       snprintf(str_mm, 9, "%d", average_mm);
       snprintf(str_raw, 9, "%d", adc0);
 
@@ -103,8 +107,8 @@ void loop() {
       Particle.publish("raw_16bit", str_raw);
     }
 
-    // reset counter after a minute, publish only then, but only if connected
-    secs_till_last_log = 0;
+    // reset counter after CYCLES_TRANSMIT_SECS, publish only then, but only if connected
+    samples_count = 0;
     sum_mm = 0;
     last_sent = Time.now();
   }
@@ -119,7 +123,7 @@ void loop() {
 
   display.display();
 
-  unsigned long long millis_diff = System.millis() + millis;
+  unsigned long long millis_diff = System.millis() - millis;
   if (millis_diff < DELAY_MS)
     delay(DELAY_MS - millis_diff); // milliseconds and blocking - see docs for more info!
 }
