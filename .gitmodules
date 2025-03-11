@@ -1,0 +1,9 @@
+[submodule "lib/PDLS_Basic"]
+	path = lib/PDLS_Basic
+	url = git@github.com:peter-ginchev/PDLS_Basic.git
+[submodule "lib/Pervasive_Wide_Small"]
+	path = lib/Pervasive_Wide_Small
+	url = git@github.com:peter-ginchev/Pervasive_Wide_Small.git
+[submodule "lib/PDLS_Common"]
+	path = lib/PDLS_Common
+	url = git@github.com:peter-ginchev/PDLS_Common.git
