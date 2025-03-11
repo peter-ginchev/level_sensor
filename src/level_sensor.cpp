@@ -37,6 +37,8 @@ SerialLogHandler logHandler(LOG_LEVEL_INFO);
 
 Adafruit_ADS1115 ads;  /* Use this for the 16-bit version */
 
+int relayPin = S4;
+
 // setup() runs once, when the device is first turned on
 void setup() {
   Log.info("Setup..");
@@ -47,6 +49,9 @@ void setup() {
   display.begin();
   display.setTextColor(WHITE);
   display.setTextSize(3);
+
+  pinMode(relayPin, OUTPUT);
+  digitalWrite(relayPin, LOW);
 }
 
 // loop() runs over and over again, as quickly as it can execute.
@@ -62,6 +67,7 @@ void loop() {
 
   bool transmitted = false;
   bool connected = Particle.connected();
+  bool high = false;
 
   short adc0 = ads.readADC_SingleEnded(0);
   int zero_based = adc0 - zero_value;
@@ -91,6 +97,13 @@ void loop() {
     snprintf(output, 9, "%2d.%02dm", mm / 1000, (mm/10) % 100);
   }
 
+  if ( ((last_sent / CYCLES_TRANSMIT_SECS) % 2 == 0) != high )
+  {
+    // change relay state
+    high = !high;
+  }
+  digitalWrite(relayPin, high ? HIGH : LOW);
+
   if (Time.now() >= last_sent + CYCLES_TRANSMIT_SECS)
   {
     if (connected)
@@ -119,6 +132,11 @@ void loop() {
     display.println("v");
   else if (!connected)
     display.println("x");
+  else
+  {
+    String isHigh = high ? "h" : "l";
+    display.println(isHigh);
+  }
 
   display.display();
 
