@@ -19,8 +19,33 @@ PRODUCT_VERSION(1);
 // ADC Ti ADS1115, used in NCD PR33-8
 #include <Adafruit_ADS1X15.h>
 
+// E-Paper Display
+#include <PDLS_Common.h>
+#include <Pervasive_Wide_Small.h>
+#include <PDLS_Basic.h>
+
 #define OLED_RESET -1
 Adafruit_SSD1306 display(OLED_RESET);
+
+const pins_t boardParticlePhoton2 =
+{
+    // ///< EXT3.1 pin 1 Black -> +3.3V
+    // ///< EXT3.1 pin 2 Brown -> SPI SCK
+    .panelBusy = D5, ///< EXT3.1 pin 3 Red
+    .panelDC = D4, ///< EXT3.1 pin 4 Orange
+    .panelReset = D3, ///< EXT3.1 pin 5 Yellow
+    // ///< EXT3.1 pin 6 Green -> SPI MISO
+    // ///< EXT3.1 pin 7 Blue -> SPI MOSI
+    .flashCS = D2, ///< EXT3.1 pin 8 Violet
+    .panelCS = SS, ///< EXT3.1 pin 9 Grey
+    // ///< EXT3.1 pin 10 White -> GROUND
+    .panelCSS = NOT_CONNECTED, ///< EXT3.1 pin 12 Grey2
+    .flashCSS = NOT_CONNECTED, ///< EXT3.1 pin 11 Black2
+};
+
+Pervasive_Wide_Small epdDriver(eScreen_EPD_417_KS_0D, boardParticlePhoton2);
+
+Screen_EPD epdScreen(&epdDriver);
 
 // There are 2 probe reads per sec, every minute transmission
 #define CYCLES_TRANSMIT_SECS 60
@@ -52,6 +77,14 @@ void setup() {
 
   pinMode(relayPin, OUTPUT);
   digitalWrite(relayPin, LOW);
+
+  SPI.begin(SPI_MODE_MASTER);
+
+  epdScreen.clear();
+  epdScreen.setOrientation(ORIENTATION_LANDSCAPE);
+  epdScreen.selectFont(Font_Terminal12x16);
+  epdScreen.gText(10, 10, epdScreen.WhoAmI(), myColours.black);
+  epdScreen.flush();
 }
 
 // loop() runs over and over again, as quickly as it can execute.
