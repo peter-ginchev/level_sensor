@@ -2,9 +2,11 @@
     "extensions.ignoreRecommendations": true,
     "C_Cpp.default.configurationProvider": "particle.particle-vscode-core",
     "files.associations": {
-        "*.ino": "cpp"
+        "*.ino": "cpp",
+        "initializer_list": "cpp"
     },
     "particle.targetDevice": "particle_1",
     "particle.firmwareVersion": "6.2.1",
-    "particle.targetPlatform": "p2"
+    "particle.targetPlatform": "p2",
+    "particle.debugWarningShown": true
 }

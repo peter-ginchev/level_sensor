@@ -27,22 +27,6 @@ PRODUCT_VERSION(1);
 #define OLED_RESET -1
 Adafruit_SSD1306 display(OLED_RESET);
 
-const pins_t boardParticlePhoton2 =
-{
-    // ///< EXT3.1 pin 1 Black -> +3.3V
-    // ///< EXT3.1 pin 2 Brown -> SPI SCK
-    .panelBusy = D5, ///< EXT3.1 pin 3 Red
-    .panelDC = D4, ///< EXT3.1 pin 4 Orange
-    .panelReset = D3, ///< EXT3.1 pin 5 Yellow
-    // ///< EXT3.1 pin 6 Green -> SPI MISO
-    // ///< EXT3.1 pin 7 Blue -> SPI MOSI
-    .flashCS = D2, ///< EXT3.1 pin 8 Violet
-    .panelCS = SS, ///< EXT3.1 pin 9 Grey
-    // ///< EXT3.1 pin 10 White -> GROUND
-    .panelCSS = NOT_CONNECTED, ///< EXT3.1 pin 12 Grey2
-    .flashCSS = NOT_CONNECTED, ///< EXT3.1 pin 11 Black2
-};
-
 Pervasive_Wide_Small epdDriver(eScreen_EPD_417_KS_0D, boardParticlePhoton2);
 
 Screen_EPD epdScreen(&epdDriver);
@@ -78,12 +62,17 @@ void setup() {
   pinMode(relayPin, OUTPUT);
   digitalWrite(relayPin, LOW);
 
-  SPI.begin(SPI_MODE_MASTER);
+  uint16_t x = 10;
+  uint16_t y = 10;
 
+  epdScreen.begin();
+  epdScreen.regenerate();
   epdScreen.clear();
   epdScreen.setOrientation(ORIENTATION_LANDSCAPE);
-  epdScreen.selectFont(Font_Terminal12x16);
-  epdScreen.gText(10, 10, epdScreen.WhoAmI(), myColours.black);
+  epdScreen.selectFont(Font_Terminal16x24);
+  epdScreen.gText(x, y, "Hello, world!");
+  y += epdScreen.characterSizeY() + 10;
+  epdScreen.gText(x, y, ", TEXT");
   epdScreen.flush();
 }
 
