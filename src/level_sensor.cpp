@@ -65,6 +65,7 @@ void setup() {
   uint16_t x = 10;
   uint16_t y = 10;
 
+  hV_HAL_SPI3_define();
   epdScreen.begin();
   epdScreen.regenerate();
   epdScreen.clear();
@@ -72,7 +73,11 @@ void setup() {
   epdScreen.selectFont(Font_Terminal16x24);
   epdScreen.gText(x, y, "Hello, world!");
   y += epdScreen.characterSizeY() + 10;
-  epdScreen.gText(x, y, ", TEXT");
+  epdScreen.gText(x, y, "Level: ");
+  y += epdScreen.characterSizeY() + 10;
+  epdScreen.gText(x, y, "Pressure: ");
+  y += epdScreen.characterSizeY() + 10;
+  epdScreen.gText(x, y, "Flow: ");
   epdScreen.flush();
 }
 
