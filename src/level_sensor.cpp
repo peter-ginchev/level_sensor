@@ -27,12 +27,12 @@ PRODUCT_VERSION(1);
 #define OLED_RESET -1
 Adafruit_SSD1306 display(OLED_RESET);
 
+const uint16_t xOffset = 10;
+const uint16_t yOffset = 10;
+const uint16_t yPitch = 10;
 Pervasive_Wide_Small epdDriver(eScreen_EPD_417_KS_0D, boardParticlePhoton2);
 
 Screen_EPD epdScreen(&epdDriver);
-
-// There are 2 probe reads per sec, every minute transmission
-#define CYCLES_TRANSMIT_SECS 60
 
 // Delay between probes
 #define DELAY_MS 500
@@ -44,16 +44,237 @@ SYSTEM_MODE(AUTOMATIC);
 // View logs with CLI using 'particle serial monitor --follow'
 SerialLogHandler logHandler(LOG_LEVEL_INFO);
 
-Adafruit_ADS1115 ads;  /* Use this for the 16-bit version */
-
 int relayPin = S4;
+
+class DisplayLine {
+public:
+  DisplayLine(Screen_EPD *screen, unsigned line): screen(screen), line(line)
+  {
+  }
+  void display(String text)
+  {
+    const uint16_t x = xOffset;
+    const uint16_t y = getY();
+
+    screen->gTextLarge(x, y, text);
+  }
+  void display(String text, String param)
+  {
+    const uint16_t x = xOffset;
+    const uint16_t y = getY();
+
+    screen->gTextLarge(x, y, text);
+    screen->gTextLarge(x + 2*screen->stringSizeX(text + " "), y, param);
+  }
+
+private:
+  Screen_EPD *screen;
+  uint8_t line;
+
+  uint16_t getY(void)
+  {
+    return yOffset + (line-1) * (2*screen->characterSizeY() + yPitch);
+  }
+};
+
+class DisplayTime {
+public:
+  DisplayTime(Screen_EPD *screen): screen(screen) {
+    Time.zone(+2.);
+  }
+  void display(void)
+  {
+    updateDst();
+    screen->gText(xOffset, screen->screenSizeY() - screen->characterSizeY(), Time.format(Time.now(), TIME_FORMAT_ISO8601_FULL));
+  }
+private:
+  Screen_EPD *screen;
+  bool inDST = false;
+
+  void updateDst(void)
+  {
+    bool nowDST = isNowDST();
+    if (inDST == nowDST)
+      return;
+
+    inDST = nowDST;
+
+    if (inDST)
+      Time.beginDST();
+    else
+      Time.endDST();
+  }
+
+  // Function to check if DST is active in Bulgaria (EU rules)
+  bool isNowDST(void) {
+    int month = Time.month();
+    int day = Time.day();
+    int dow = Time.weekday() - 1; // 0 = Sunday, 6 = Saturday
+    int hour = Time.hour();
+
+    // DST starts: Last Sunday of March at 1:00 UTC (3:00 local, moves to 4:00)
+    if (month > 3 && month < 10) return true; // April to September: always DST
+    if (month < 3 || month > 10) return false; // Before March or after October: no DST
+
+    // March: Check if it's after the last Sunday
+    if (month == 3) {
+      int lastSunday = day - dow; // Day of the last Sunday so far
+      if (lastSunday + 7 <= 31) lastSunday += 7; // Ensure it's the last Sunday
+      if (day < lastSunday) return false;
+      if (day == lastSunday && hour < 3) return false; // Before 3:00 local time
+      return true;
+    }
+
+    // October: Check if it's before the last Sunday
+    if (month == 10) {
+      int lastSunday = day - dow;
+      if (lastSunday + 7 <= 31) lastSunday += 7;
+      if (day > lastSunday) return false;
+      if (day == lastSunday && hour >= 2) return false; // After 2:00 local (back to 3:00)
+      return true;
+    }
+
+    return false; // Default case (shouldn’t hit)
+  }
+};
+
+DisplayTime displayTime(&epdScreen);
+
+class TransmitAverage {
+public:
+  // Every minute transmission
+  const int CYCLES_TRANSMIT_SECS = 60;
+
+  TransmitAverage(String name): name(name)
+  {
+    last_sent = Time.now();
+  }
+
+  bool loop(unsigned value)
+  {
+    bool transmitted = false;
+
+    sum += value;
+    samples_count++;
+
+    if (Time.now() < last_sent + CYCLES_TRANSMIT_SECS)
+      return false;
+
+    if (Particle.connected())
+    {
+      char str[10] = {};
+      snprintf(str, 9, "%ld", sum / samples_count);
+      transmitted = Particle.publish(name, str);
+    }
+
+    samples_count = 0;
+    sum = 0;
+    last_sent = Time.now();
+    return transmitted;
+  }
+private:
+  String name;
+  time32_t last_sent;
+  long sum = 0;
+  unsigned samples_count = 0;
+};
+
+class WaterLevel {
+public:
+  WaterLevel(Screen_EPD *screen, unsigned screenLine)
+  : line(screen, screenLine)
+  {}
+
+  void display()
+  {
+    char output[10] = {};
+    if (level_mm < 1000)
+    {
+      // under a meter, show in cm
+      snprintf(output, sizeof(output) - 1, "%02d.%1dcm", level_mm / 10, level_mm % 10);
+    }
+    else
+    {
+      // above a meter, show in m
+      snprintf(output, sizeof(output) - 1, "%2d.%02dm", level_mm / 1000, (level_mm/10) % 100);
+    }
+
+    line.display("Level:", output);
+  }
+
+  void setValue(unsigned level_mm)
+  {
+    this->level_mm = level_mm;
+    transmit.loop(level_mm);
+  }
+
+private:
+  DisplayLine line;
+  unsigned level_mm;
+  TransmitAverage transmit = TransmitAverage("depth_mm");
+};
+
+WaterLevel waterLevel(&epdScreen, 1);
+DisplayLine pressureLine(&epdScreen, 2);
+DisplayLine flowLine(&epdScreen, 3);
+DisplayLine pumpOnLine(&epdScreen, 4);
+
+void updateScreen(uint16_t pressure, uint16_t flow, bool pumpOn)
+{
+  epdScreen.clear();
+
+  waterLevel.display();
+  pressureLine.display("Pressure:");
+  flowLine.display("Flow:");
+  pumpOnLine.display("Pump:", pumpOn ? "ON " : "OFF");
+
+  displayTime.display();
+
+  epdScreen.flush();
+}
+
+class CurrentSensor {
+public:
+  CurrentSensor(void)
+  {
+    ads.setGain(GAIN_TWO);
+    ads.begin();
+  }
+  void setRange(char id, uint64_t min, uint64_t max)
+  {
+    this->min[id] = min;
+    this->range[id] = max - min;
+  }
+  uint32_t read(char id)
+  {
+    uint16_t adc = ads.readADC_SingleEnded(id);
+    if (adc < zero_value)
+      return min[id]; // usually means the sensor is not connected
+
+    int zero_based = adc - zero_value;
+
+    return min[id] + (zero_based*inc_denom*range[id])/(inc_nom*inc_output);
+  }
+private:
+  Adafruit_ADS1115 ads;  /* Use this for the 16-bit version */
+  static const uint16_t zero_value = 6425;
+  static const uint64_t inc_nom = 643;
+  static const uint64_t inc_denom = 250;
+  static const uint64_t inc_output = 10000;
+  uint64_t min[2];
+  uint64_t range[2];
+};
+
+CurrentSensor *currentSensor;
 
 // setup() runs once, when the device is first turned on
 void setup() {
   Log.info("Setup..");
   Serial.begin(9600);
-  ads.setGain(GAIN_TWO);
-  ads.begin();
+  currentSensor = new CurrentSensor();
+  // hydrostatic pressure sensor connected to output 0,
+  // range 0-10m, 0-10000 received in mm
+  currentSensor->setRange(0, 0, 10000);
 
   display.begin();
   display.setTextColor(WHITE);
@@ -62,102 +283,32 @@ void setup() {
   pinMode(relayPin, OUTPUT);
   digitalWrite(relayPin, LOW);
 
-  uint16_t x = 10;
-  uint16_t y = 10;
-
   hV_HAL_SPI3_define();
   epdScreen.begin();
   epdScreen.regenerate();
-  epdScreen.clear();
   epdScreen.setOrientation(ORIENTATION_LANDSCAPE);
-  epdScreen.selectFont(Font_Terminal16x24);
-  epdScreen.gText(x, y, "Hello, world!");
-  y += epdScreen.characterSizeY() + 10;
-  epdScreen.gText(x, y, "Level: ");
-  y += epdScreen.characterSizeY() + 10;
-  epdScreen.gText(x, y, "Pressure: ");
-  y += epdScreen.characterSizeY() + 10;
-  epdScreen.gText(x, y, "Flow: ");
-  epdScreen.flush();
+  epdScreen.selectFont(Font_Terminal12x16);
 }
 
 // loop() runs over and over again, as quickly as it can execute.
 void loop() {
-  int zero_value = 6425;
-  int mm_inc_nom = 643;
-  int mm_inc_denom = 250;
-  static int samples_count = 0;
-  static long sum_mm = 0;
-  static time32_t last_sent = Time.now();
-
   unsigned long long millis = System.millis();
 
-  bool transmitted = false;
   bool connected = Particle.connected();
   bool high = false;
 
-  short adc0 = ads.readADC_SingleEnded(0);
-  int zero_based = adc0 - zero_value;
-  int mm = (zero_based*mm_inc_denom)/mm_inc_nom;
-  sum_mm += mm;
-  samples_count++;
+  waterLevel.setValue(currentSensor->read(0));
 
-  char output[10] = {};
-  if (mm < 0)
-  {
-    // below zero
-    snprintf(output, 9, " 0.0cm");
-  }
-  else if (mm > 10000)
-  {
-    // above max
-    snprintf(output, 9, "10.00m");
-  }
-  else if (mm < 1000)
-  {
-    // under a meter, show in cm
-    snprintf(output, 9, "%2d.%1dcm", mm / 10, mm % 10);
-  }
-  else
-  {
-    // above a meter, show in m
-    snprintf(output, 9, "%2d.%02dm", mm / 1000, (mm/10) % 100);
-  }
-
-  if ( ((last_sent / CYCLES_TRANSMIT_SECS) % 2 == 0) != high )
+  if ( ((Time.now() / 60) % 2 == 0) != high )
   {
     // change relay state
     high = !high;
   }
   digitalWrite(relayPin, high ? HIGH : LOW);
 
-  if (Time.now() >= last_sent + CYCLES_TRANSMIT_SECS)
-  {
-    if (connected)
-    {
-      char str_mm[10] = {};
-      char str_raw[10] = {};
-
-      int average_mm = sum_mm / samples_count;
-      snprintf(str_mm, 9, "%d", average_mm);
-      snprintf(str_raw, 9, "%d", adc0);
-
-      transmitted = Particle.publish("depth_mm", str_mm);
-      Particle.publish("raw_16bit", str_raw);
-    }
-
-    // reset counter after CYCLES_TRANSMIT_SECS, publish only then, but only if connected
-    samples_count = 0;
-    sum_mm = 0;
-    last_sent = Time.now();
-  }
-
   display.clearDisplay();
   display.setCursor(0,10);
-  display.println(output);
-  if (transmitted)
-    display.println("v");
-  else if (!connected)
+  if (!connected)
     display.println("x");
   else
   {
@@ -166,6 +317,7 @@ void loop() {
   }
 
   display.display();
+  updateScreen(0, 0, high);
 
   unsigned long long millis_diff = System.millis() - millis;
   if (millis_diff < DELAY_MS)
