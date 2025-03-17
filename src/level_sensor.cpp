@@ -27,11 +27,7 @@ PRODUCT_VERSION(1);
 #define OLED_RESET -1
 Adafruit_SSD1306 display(OLED_RESET);
 
-const uint16_t xOffset = 10;
-const uint16_t yOffset = 10;
-const uint16_t yPitch = 10;
 Pervasive_Wide_Small epdDriver(eScreen_EPD_417_KS_0D, boardParticlePhoton2);
-
 Screen_EPD epdScreen(&epdDriver);
 
 // Delay between probes
@@ -48,47 +44,68 @@ int relayPin = S4;
 
 class DisplayLine {
 public:
-  DisplayLine(Screen_EPD *screen, unsigned line): screen(screen), line(line)
+  // Negative line numbers are counted from the bottom of the screen
+  // Numbers start from 1 and -1
+  DisplayLine(Screen_EPD *screen, int line): screen(screen), line(line)
   {
   }
   void display(String text)
   {
-    const uint16_t x = xOffset;
-    const uint16_t y = getY();
+    updateCoordinates();
 
-    screen->gTextLarge(x, y, text);
+    if (line < 0)
+      screen->gText(x, y, text);
+    else
+      screen->gTextLarge(x, y, text);
   }
   void display(String text, String param)
   {
-    const uint16_t x = xOffset;
-    const uint16_t y = getY();
+    updateCoordinates();
 
-    screen->gTextLarge(x, y, text);
-    screen->gTextLarge(x + 2*screen->stringSizeX(text + " "), y, param);
+    if (line < 0)
+    {
+      screen->gText(x, y, text);
+      screen->gText(x + 2*screen->stringSizeX(text + " "), y, param);
+    }
+    else
+    {
+      screen->gTextLarge(x, y, text);
+      screen->gTextLarge(x + 2*screen->stringSizeX(text + " "), y, param);
+    }
   }
 
 private:
   Screen_EPD *screen;
-  uint8_t line;
+  int line;
 
-  uint16_t getY(void)
+  const uint16_t xOffset = 10;
+  const uint16_t yOffset = 10;
+  const uint16_t yPitch = 10;
+  uint16_t x, y;
+
+  uint16_t updateCoordinates(void)
   {
-    return yOffset + (line-1) * (2*screen->characterSizeY() + yPitch);
+    x = xOffset;
+    if (line < 0)
+      y = screen->screenSizeY() - yOffset + line * screen->characterSizeY() + (line+1) * yPitch;
+    else
+      y = yOffset + (line-1) * (2*screen->characterSizeY() + yPitch);
   }
 };
 
 class DisplayTime {
 public:
-  DisplayTime(Screen_EPD *screen): screen(screen) {
+  DisplayTime(Screen_EPD *screen): line(screen, -1)
+  {
     Time.zone(+2.);
   }
   void display(void)
   {
     updateDst();
-    screen->gText(xOffset, screen->screenSizeY() - screen->characterSizeY(), Time.format(Time.now(), TIME_FORMAT_ISO8601_FULL));
+    line.display(Time.format(Time.now(), TIME_FORMAT_ISO8601_FULL));
   }
 private:
-  Screen_EPD *screen;
+  DisplayLine line;
   bool inDST = false;
 
   void updateDst(void)
