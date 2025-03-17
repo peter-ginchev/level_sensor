@@ -83,7 +83,7 @@ private:
   const uint16_t yPitch = 10;
   uint16_t x, y;
 
-  uint16_t updateCoordinates(void)
+  void updateCoordinates(void)
   {
     x = xOffset;
     if (line < 0)
@@ -257,12 +257,12 @@ public:
     ads.setGain(GAIN_TWO);
     ads.begin();
   }
-  void setRange(char id, uint64_t min, uint64_t max)
+  void setRange(uint8_t id, uint64_t min, uint64_t max)
   {
     this->min[id] = min;
     this->range[id] = max - min;
   }
-  uint32_t read(char id)
+  uint32_t read(uint8_t id)
   {
     uint16_t adc = ads.readADC_SingleEnded(id);
     if (adc < zero_value)
