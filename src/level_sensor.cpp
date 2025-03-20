@@ -376,19 +376,54 @@ private:
   }
 };
 
+class WaterMeter {
+public:
+  WaterMeter(int pin)
+  {
+    pinMode(pin, INPUT_PULLUP);
+    attachInterrupt(pin, &WaterMeter::pulseInterrupt, this, FALLING);
+  }
+
+  uint32_t getAndResetCount()
+  {
+    uint32_t count;
+    ATOMIC_BLOCK() {
+      count = pulseCount;
+      pulseCount = 0;
+    }
+    return count;
+  }
+
+private:
+  const uint32_t debounceMs = 50;
+  uint32_t lastPulse;
+  volatile uint32_t pulseCount;
+
+  void pulseInterrupt(void)
+  {
+    uint32_t currentTime = millis();
+
+    if (currentTime - lastPulse < debounceMs)
+      return;
+
+    pulseCount++;
+    lastPulse = currentTime;
+  }
+};
+
 class Relay {
 public:
-  Relay(void)
+  Relay(int pin): pin(pin)
   {
-    pinMode(relayPin, OUTPUT);
-    digitalWrite(relayPin, LOW);
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
   }
   void set(bool high)
   {
-    digitalWrite(relayPin, high ? HIGH : LOW);
+    digitalWrite(pin, high ? HIGH : LOW);
   }
 private:
-  const int relayPin = S4;
+  const int pin;
 };
 
 Relay *relay;
@@ -401,6 +436,8 @@ WaterLevel *waterLevel;
 Pressure *pressure;
 DisplayLine *flowLine;
 DisplayLine *pumpOnLine;
+
+WaterMeter *reedSensor;
 
 Display *display;
 
@@ -417,13 +454,16 @@ void setup() {
   waterLevel = new WaterLevel(display, 1, currentSensor);
   pressure = new Pressure(display, 2, currentSensor);
 
+  // TODO: integrate flow rate calculation
   flowLine = new DisplayLine(display, 3);
   flowLine->setText("Flow:");
+  reedSensor = new WaterMeter(D10); // Lower pull-up resistance is better
 
   pumpOnLine = new DisplayLine(display, 4);
   pumpOnLine->setText("Pump:", "OFF");
 
-  relay = new Relay();
+  // The relay controls the pump power
+  relay = new Relay(S4);
 }
 
 // loop() runs over and over again, as quickly as it can execute.
