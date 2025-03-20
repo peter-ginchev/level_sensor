@@ -11,10 +11,9 @@
 
 PRODUCT_VERSION(1);
 
-#include <Wire.h>
+#include <list>
 
-// OLED Display
-#include <Adafruit_SSD1306.h>
+#include <Wire.h>
 
 // ADC Ti ADS1115, used in NCD PR33-8
 #include <Adafruit_ADS1X15.h>
@@ -24,11 +23,7 @@ PRODUCT_VERSION(1);
 #include <Pervasive_Wide_Small.h>
 #include <PDLS_Basic.h>
 
-#define OLED_RESET -1
-Adafruit_SSD1306 display(OLED_RESET);
-
 Pervasive_Wide_Small epdDriver(eScreen_EPD_417_KS_0D, boardParticlePhoton2);
-Screen_EPD epdScreen(&epdDriver);
 
 // Delay between probes
 #define DELAY_MS 500
@@ -40,50 +35,104 @@ SYSTEM_MODE(AUTOMATIC);
 // View logs with CLI using 'particle serial monitor --follow'
 SerialLogHandler logHandler(LOG_LEVEL_INFO);
 
-int relayPin = S4;
+class DisplayLineInterface
+{
+public:
+  virtual void update(Screen_EPD *screen) = 0;
+};
 
-class DisplayLine {
+class Display
+{
+public:
+  Display(Pervasive_Wide_Small *driver): screen(driver)
+  {
+    hV_HAL_SPI3_define();
+    screen.begin();
+    screen.regenerate();
+    screen.setOrientation(ORIENTATION_LANDSCAPE);
+    screen.selectFont(Font_Terminal12x16);
+  }
+
+  void tick(void)
+  {
+    display();
+  }
+
+protected:
+  friend class DisplayLine;
+
+  void addLine(DisplayLineInterface *line)
+  {
+    lines.push_back(line);
+  }
+private:
+  Screen_EPD screen;
+  std::list<DisplayLineInterface*> lines;
+
+  void display(void)
+  {
+    screen.clear();
+    for (auto line : lines)
+    {
+      line->update(&screen);
+    }
+    screen.flush();
+  }
+};
+
+class DisplayLine : public DisplayLineInterface
+{
 public:
   // Negative line numbers are counted from the bottom of the screen
   // Numbers start from 1 and -1
-  DisplayLine(Screen_EPD *screen, int line): screen(screen), line(line)
+  DisplayLine(Display *display, int line): display(display), line(line)
   {
+    display->addLine(this);
   }
-  void display(String text)
+  void setText(String text)
   {
-    updateCoordinates();
+    this->text = text;
+    this->param = "";
+  }
+  void setText(String text, String param)
+  {
+    this->text = text;
+    this->param = param;
+  }
 
-    if (line < 0)
-      screen->gText(x, y, text);
-    else
-      screen->gTextLarge(x, y, text);
-  }
-  void display(String text, String param)
+protected:
+  friend class Display;
+
+  void update(Screen_EPD *screen)
   {
-    updateCoordinates();
+    updateCoordinates(screen);
 
     if (line < 0)
     {
       screen->gText(x, y, text);
-      screen->gText(x + 2*screen->stringSizeX(text + " "), y, param);
+      if (param.length() > 0)
+        screen->gText(x + 2*screen->stringSizeX(text + " "), y, param);
     }
     else
     {
       screen->gTextLarge(x, y, text);
-      screen->gTextLarge(x + 2*screen->stringSizeX(text + " "), y, param);
+      if (param.length() > 0)
+        screen->gTextLarge(x + 2*screen->stringSizeX(text + " "), y, param);
     }
   }
 
 private:
-  Screen_EPD *screen;
+  Display *display;
   int line;
+
+  String text, param;
 
   const uint16_t xOffset = 10;
   const uint16_t yOffset = 10;
   const uint16_t yPitch = 10;
   uint16_t x, y;
 
-  void updateCoordinates(void)
+  void updateCoordinates(Screen_EPD *screen)
   {
     x = xOffset;
     if (line < 0)
@@ -95,14 +144,14 @@ private:
 
 class DisplayTime {
 public:
-  DisplayTime(Screen_EPD *screen): line(screen, -1)
+  DisplayTime(Display *display): line(display, -1)
   {
     Time.zone(+2.);
   }
-  void display(void)
+  void tick(void)
   {
     updateDst();
-    line.display(Time.format(Time.now(), TIME_FORMAT_ISO8601_FULL));
+    line.setText(Time.format(Time.now(), TIME_FORMAT_ISO8601_FULL));
   }
 private:
   DisplayLine line;
@@ -155,8 +204,6 @@ private:
   }
 };
 
-DisplayTime displayTime(&epdScreen);
-
 class TransmitAverage {
 public:
   // Every minute transmission
@@ -196,13 +243,91 @@ private:
   unsigned samples_count = 0;
 };
 
+class CurrentSensor {
+public:
+  CurrentSensor(void)
+  {
+    ads.setGain(GAIN_TWO);
+    ads.begin();
+  }
+protected:
+  friend class CurrentSensorReading;
+
+  uint16_t read(uint8_t id)
+  {
+    return ads.readADC_SingleEnded(id);
+  }
+private:
+  Adafruit_ADS1115 ads;  /* Use this for the 16-bit version */
+};
+
+class CurrentSensorReading
+{
+public:
+  CurrentSensorReading(CurrentSensor *sensor, uint8_t id, uint64_t min, uint64_t max)
+  : sensor(sensor), id(id)
+  {
+    setRange(min, max);
+  }
+
+  uint32_t read(void)
+  {
+    uint16_t value = sensor->read(id);
+
+    return translate(value);
+  }
+private:
+  CurrentSensor *sensor;
+  uint8_t id;
+
+  void setRange(uint64_t min, uint64_t max)
+  {
+    this->min = min;
+    this->range = max - min;
+  }
+
+  uint32_t translate(uint16_t adc)
+  {
+    if (adc < zero_value)
+      return min; // usually means the sensor is not connected
+
+    uint64_t zero_based = adc - zero_value;
+
+    return min + (zero_based*inc_denom*range)/(inc_nom*inc_output);
+  }
+private:
+  static const uint16_t zero_value = 6425;
+  static const uint64_t inc_nom = 643;
+  static const uint64_t inc_denom = 250;
+  static const uint64_t inc_output = 10000;
+  uint64_t min;
+  uint64_t range;
+};
+
 class WaterLevel {
 public:
-  WaterLevel(Screen_EPD *screen, unsigned screenLine)
-  : line(screen, screenLine)
+  WaterLevel(Display *display, unsigned screenLine, CurrentSensor *sensor)
+  : line(display, screenLine)
+    // hydrostatic pressure sensor connected to output 0,
+    // range 0-10m, 0-10000 received in mm
+  , sensor(sensor, 0, 0, 10000)
+  , level_mm(0)
   {}
 
-  void display()
+  void readValue(void)
+  {
+    level_mm = sensor.read();
+    setText();
+    transmit.loop(level_mm);
+  }
+
+private:
+  DisplayLine line;
+  CurrentSensorReading sensor;
+  unsigned level_mm;
+  TransmitAverage transmit = TransmitAverage("depth_mm");
+
+  void setText()
   {
     char output[10] = {};
     if (level_mm < 1000)
@@ -216,125 +341,110 @@ public:
       snprintf(output, sizeof(output) - 1, "%2d.%02dm", level_mm / 1000, (level_mm/10) % 100);
     }
 
-    line.display("Level:", output);
+    line.setText("Level:", output);
   }
+};
 
-  void setValue(unsigned level_mm)
+class Pressure {
+public:
+  Pressure(Display *display, unsigned screenLine, CurrentSensor *sensor)
+  : line(display, screenLine)
+    // water pressure sensor connected to output 1,
+    // range 0-6bar, 0-6000 received in mbar
+  , sensor(sensor, 1, 0, 6000)
+  , mbar(0)
+  {}
+
+  void readValue(void)
   {
-    this->level_mm = level_mm;
-    transmit.loop(level_mm);
+    mbar = sensor.read();
+    setText();
+    transmit.loop(mbar);
   }
 
 private:
   DisplayLine line;
-  unsigned level_mm;
-  TransmitAverage transmit = TransmitAverage("depth_mm");
+  CurrentSensorReading sensor;
+  unsigned mbar;
+  TransmitAverage transmit = TransmitAverage("pressure_mbar");
+
+  void setText()
+  {
+    char output[10] = {};
+    snprintf(output, sizeof(output) - 1, "%01d.%2dbar", mbar / 1000, (mbar/10) % 100);
+    line.setText("Pressure:", output);
+  }
 };
 
-WaterLevel waterLevel(&epdScreen, 1);
-DisplayLine pressureLine(&epdScreen, 2);
-DisplayLine flowLine(&epdScreen, 3);
-DisplayLine pumpOnLine(&epdScreen, 4);
-
-void updateScreen(uint16_t pressure, uint16_t flow, bool pumpOn)
-{
-  epdScreen.clear();
-
-  waterLevel.display();
-  pressureLine.display("Pressure:");
-  flowLine.display("Flow:");
-  pumpOnLine.display("Pump:", pumpOn ? "ON " : "OFF");
-
-  displayTime.display();
-
-  epdScreen.flush();
-}
-
-class CurrentSensor {
+class Relay {
 public:
-  CurrentSensor(void)
+  Relay(void)
   {
-    ads.setGain(GAIN_TWO);
-    ads.begin();
+    pinMode(relayPin, OUTPUT);
+    digitalWrite(relayPin, LOW);
   }
-  void setRange(uint8_t id, uint64_t min, uint64_t max)
+  void set(bool high)
   {
-    this->min[id] = min;
-    this->range[id] = max - min;
-  }
-  uint32_t read(uint8_t id)
-  {
-    uint16_t adc = ads.readADC_SingleEnded(id);
-    if (adc < zero_value)
-      return min[id]; // usually means the sensor is not connected
-
-    int zero_based = adc - zero_value;
-
-    return min[id] + (zero_based*inc_denom*range[id])/(inc_nom*inc_output);
+    digitalWrite(relayPin, high ? HIGH : LOW);
   }
 private:
-  Adafruit_ADS1115 ads;  /* Use this for the 16-bit version */
-  static const uint16_t zero_value = 6425;
-  static const uint64_t inc_nom = 643;
-  static const uint64_t inc_denom = 250;
-  static const uint64_t inc_output = 10000;
-  uint64_t min[2];
-  uint64_t range[2];
+  const int relayPin = S4;
 };
 
+Relay *relay;
+
 CurrentSensor *currentSensor;
+
+DisplayTime *displayTime;
+
+WaterLevel *waterLevel;
+Pressure *pressure;
+DisplayLine *flowLine;
+DisplayLine *pumpOnLine;
+
+Display *display;
 
 // setup() runs once, when the device is first turned on
 void setup() {
   Log.info("Setup..");
   Serial.begin(9600);
   currentSensor = new CurrentSensor();
-  // hydrostatic pressure sensor connected to output 0,
-  // range 0-10m, 0-10000 received in mm
-  currentSensor->setRange(0, 0, 10000);
 
-  display.begin();
-  display.setTextColor(WHITE);
-  display.setTextSize(3);
+  display = new Display(&epdDriver);
 
-  pinMode(relayPin, OUTPUT);
-  digitalWrite(relayPin, LOW);
+  displayTime = new DisplayTime(display);
 
-  hV_HAL_SPI3_define();
-  epdScreen.begin();
-  epdScreen.regenerate();
-  epdScreen.setOrientation(ORIENTATION_LANDSCAPE);
-  epdScreen.selectFont(Font_Terminal12x16);
+  waterLevel = new WaterLevel(display, 1, currentSensor);
+  pressure = new Pressure(display, 2, currentSensor);
+
+  flowLine = new DisplayLine(display, 3);
+  flowLine->setText("Flow:");
+
+  pumpOnLine = new DisplayLine(display, 4);
+  pumpOnLine->setText("Pump:", "OFF");
+
+  relay = new Relay();
 }
 
 // loop() runs over and over again, as quickly as it can execute.
 void loop() {
   unsigned long long millis = System.millis();
 
-  bool connected = Particle.connected();
+  // TODO: display: Particle.connected();
   bool high = false;
 
-  waterLevel.setValue(currentSensor->read(0));
+  waterLevel->readValue();
+  pressure->readValue();
 
   if ( ((Time.now() / 60) % 2 == 0) != high )
   {
     // change relay state
     high = !high;
   }
-  digitalWrite(relayPin, high ? HIGH : LOW);
-
-  display.clearDisplay();
-  display.setCursor(0,10);
-  if (!connected)
-    display.println("x");
-  else
-  {
-    String isHigh = high ? "h" : "l";
-    display.println(isHigh);
-  }
-
-  display.display();
-  updateScreen(0, 0, high);
+  relay->set(high);
+  pumpOnLine->setText("Pump:", high ? "ON " : "OFF");
+  displayTime->tick();
+  display->tick();
 
   unsigned long long millis_diff = System.millis() - millis;
   if (millis_diff < DELAY_MS)
