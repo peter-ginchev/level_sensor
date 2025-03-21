@@ -12,6 +12,7 @@
 PRODUCT_VERSION(1);
 
 #include <list>
+#include <atomic>
 
 #include <Wire.h>
 
@@ -384,30 +385,27 @@ public:
     attachInterrupt(pin, &WaterMeter::pulseInterrupt, this, FALLING);
   }
 
-  uint32_t getAndResetCount()
+  uint32_t getAndResetCount(void)
   {
-    uint32_t count;
-    ATOMIC_BLOCK() {
-      count = pulseCount;
-      pulseCount = 0;
-    }
-    return count;
+    return pulseCount.exchange(0);
   }
 
 private:
   const uint32_t debounceMs = 50;
-  uint32_t lastPulse;
-  volatile uint32_t pulseCount;
+  std::atomic_uint32_t pulseCount = 0;
 
   void pulseInterrupt(void)
   {
+    static uint32_t lastPulse;
     uint32_t currentTime = millis();
 
-    if (currentTime - lastPulse < debounceMs)
-      return;
+    ATOMIC_BLOCK() {
+      if (currentTime - lastPulse < debounceMs)
+        return;
+      lastPulse = currentTime;
+    }
 
     pulseCount++;
-    lastPulse = currentTime;
   }
 };
 
@@ -426,7 +424,7 @@ private:
   const int pin;
 };
 
-Relay *relay;
+Relay *pumpRelay;
 
 CurrentSensor *currentSensor;
 
@@ -463,7 +461,7 @@ void setup() {
   pumpOnLine->setText("Pump:", "OFF");
 
   // The relay controls the pump power
-  relay = new Relay(S4);
+  pumpRelay = new Relay(S4);
 }
 
 // loop() runs over and over again, as quickly as it can execute.
@@ -481,7 +479,7 @@ void loop() {
     // change relay state
     high = !high;
   }
-  relay->set(high);
+  pumpRelay->set(high);
   pumpOnLine->setText("Pump:", high ? "ON " : "OFF");
   displayTime->tick();
   display->tick();
