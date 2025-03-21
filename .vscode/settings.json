@@ -3,7 +3,11 @@
     "C_Cpp.default.configurationProvider": "particle.particle-vscode-core",
     "files.associations": {
         "*.ino": "cpp",
-        "initializer_list": "cpp"
+        "initializer_list": "cpp",
+        "array": "cpp",
+        "string_view": "cpp",
+        "format": "cpp",
+        "span": "cpp"
     },
     "particle.targetDevice": "particle_1",
     "particle.firmwareVersion": "6.2.1",

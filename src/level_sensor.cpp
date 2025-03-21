@@ -334,12 +334,12 @@ private:
     if (level_mm < 1000)
     {
       // under a meter, show in cm
-      snprintf(output, sizeof(output) - 1, "%02d.%1dcm", level_mm / 10, level_mm % 10);
+      snprintf(output, sizeof(output) - 1, "%02d.%1d cm", level_mm / 10, level_mm % 10);
     }
     else
     {
       // above a meter, show in m
-      snprintf(output, sizeof(output) - 1, "%2d.%02dm", level_mm / 1000, (level_mm/10) % 100);
+      snprintf(output, sizeof(output) - 1, "%2d.%02d m", level_mm / 1000, (level_mm/10) % 100);
     }
 
     line.setText("Level:", output);
@@ -372,7 +372,7 @@ private:
   void setText()
   {
     char output[10] = {};
-    snprintf(output, sizeof(output) - 1, "%01d.%2dbar", mbar / 1000, (mbar/10) % 100);
+    snprintf(output, sizeof(output) - 1, "%01d.%2d bar", mbar / 1000, (mbar/10) % 100);
     line.setText("Pressure:", output);
   }
 };
@@ -390,8 +390,13 @@ public:
     return pulseCount.exchange(0);
   }
 
+  uint32_t getCount(void)
+  {
+    return pulseCount.load();
+  }
+
 private:
-  const uint32_t debounceMs = 50;
+  const uint32_t debounceMs = 30;
   std::atomic_uint32_t pulseCount = 0;
 
   void pulseInterrupt(void)
@@ -406,6 +411,77 @@ private:
     }
 
     pulseCount++;
+  }
+};
+
+class FlowRate {
+public:
+  FlowRate(Display *display, unsigned screenLine, WaterMeter *meter)
+  : line(display, screenLine)
+  , meter(meter)
+  , lastPulseTime(System.millis())
+  , flowLPM(0)
+  , noFlow(true)
+  , startFlow(false)
+  {
+    meter->getAndResetCount();
+  }
+  void readValue(void)
+  {
+    uint64_t currentTime = System.millis();
+    uint32_t pulseTime = currentTime - lastPulseTime;
+    // we want to round the value over some time to have more realistic average
+    if (pulseTime < 3000 && !noFlow && !startFlow)
+      return;
+    if (noFlow)
+    {
+      /* if we didn't have a flow and receive a pulse, it's hard to estimate the flow rate
+       * so we have a flag that helps us to avoid looking at the first pulse and
+       * estimate over a long period, when it just started.
+       * If it was a single pulse over some large period, we consider it as no flow */
+      if (meter->getAndResetCount() > 0)
+      {
+        lastPulseTime = currentTime;
+        noFlow = false;
+        startFlow = true;
+      }
+      return;
+    }
+    if (startFlow)
+    {
+      // estimate over more than a second
+      if (pulseTime < 1000)
+        return;
+      if (meter->getCount() == 0)
+      {
+        // single pulse over a minute is considered as no flow
+        if (pulseTime > 60000)
+          noFlow = true;
+        return;
+      }
+      startFlow = false;
+    }
+    uint32_t pulses = meter->getAndResetCount();
+    lastPulseTime = currentTime;
+
+    flowLPM = pulses * 60 * 1000 / pulseTime;
+    noFlow = pulses == 0;
+    setText();
+    transmit.loop(flowLPM);
+  }
+private:
+  DisplayLine line;
+  WaterMeter *meter;
+  uint64_t lastPulseTime;
+  uint32_t flowLPM;
+  bool noFlow, startFlow;
+  TransmitAverage transmit = TransmitAverage("flow_lpm");
+
+  void setText()
+  {
+    char output[10] = {};
+    snprintf(output, sizeof(output) - 1, "%2ld L/sec", flowLPM);
+    line.setText("Flow:", output);
   }
 };
 
@@ -424,18 +500,16 @@ private:
   const int pin;
 };
 
-Relay *pumpRelay;
-
 CurrentSensor *currentSensor;
-
-DisplayTime *displayTime;
+WaterMeter *reedSensor;
+Relay *pumpRelay;
 
 WaterLevel *waterLevel;
 Pressure *pressure;
-DisplayLine *flowLine;
+FlowRate *flowRate;
 DisplayLine *pumpOnLine;
 
-WaterMeter *reedSensor;
+DisplayTime *displayTime;
 
 Display *display;
 
@@ -452,10 +526,8 @@ void setup() {
   waterLevel = new WaterLevel(display, 1, currentSensor);
   pressure = new Pressure(display, 2, currentSensor);
 
-  // TODO: integrate flow rate calculation
-  flowLine = new DisplayLine(display, 3);
-  flowLine->setText("Flow:");
   reedSensor = new WaterMeter(D10); // Lower pull-up resistance is better
+  flowRate = new FlowRate(display, 3, reedSensor);
 
   pumpOnLine = new DisplayLine(display, 4);
   pumpOnLine->setText("Pump:", "OFF");
@@ -473,6 +545,7 @@ void loop() {
 
   waterLevel->readValue();
   pressure->readValue();
+  flowRate->readValue();
 
   if ( ((Time.now() / 60) % 2 == 0) != high )
   {
