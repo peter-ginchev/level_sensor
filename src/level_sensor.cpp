@@ -12,6 +12,8 @@
 PRODUCT_VERSION(1);
 
 #include <list>
+#include <deque>
+#include <numeric>
 #include <atomic>
 #include <functional>
 
@@ -218,7 +220,7 @@ public:
     last_sent = Time.now();
   }
 
-  bool loop(unsigned value)
+  bool loop(uint32_t value)
   {
     bool transmitted = false;
 
@@ -231,7 +233,7 @@ public:
     if (Particle.connected())
     {
       char str[10] = {};
-      snprintf(str, 9, "%ld", sum / samples_count);
+      snprintf(str, 9, "%lld", sum / samples_count);
       transmitted = Particle.publish(name, str);
     }
 
@@ -243,7 +245,7 @@ public:
 private:
   String name;
   time32_t last_sent;
-  long sum = 0;
+  uint64_t sum = 0;
   unsigned samples_count = 0;
 };
 
@@ -309,80 +311,117 @@ private:
   uint64_t range;
 };
 
-class WaterLevel
+enum class SensorDecisionTriState
+{
+  STOP = 0,
+  OK_TO_STOP = 1,
+  START = 2
+};
+
+class SensorInterface
+{
+public:
+  SensorInterface(Display *display, unsigned screenLine, String transmitName)
+  : line(display, screenLine), transmit(transmitName)
+  {
+    setText(0);
+  }
+
+  virtual SensorDecisionTriState decide(uint32_t value) = 0;
+
+  uint32_t read(void)
+  {
+    uint32_t value = readValue();
+    setText(value);
+    transmit.loop(value);
+    return value;
+  }
+protected:
+  DisplayLine line;
+
+  virtual uint32_t readValue(void) = 0;
+private:
+  TransmitAverage transmit;
+
+  virtual void setText(uint32_t)
+  {
+    line.setText("N/A");
+  }
+};
+
+class WaterLevel: public SensorInterface
 {
 public:
   WaterLevel(Display *display, unsigned screenLine, CurrentSensor *sensor)
-  : line(display, screenLine)
+  : SensorInterface(display, screenLine, "depth_mm")
     // hydrostatic pressure sensor connected to output 0,
     // range 0-10m, 0-10000 received in mm
-  , sensor(sensor, 0, 0, 10000)
-  , level_mm(0)
+  , sensor(sensor, 0, 0, 10000) { }
+
+  virtual SensorDecisionTriState decide(uint32_t level_mm) override
   {
-    setText();
+    if (level_mm < 1500)
+      return SensorDecisionTriState::STOP;
+    return SensorDecisionTriState::OK_TO_STOP;
   }
 
-  void readValue(void)
+protected:
+  uint32_t readValue(void)
   {
-    level_mm = sensor.read();
-    setText();
-    transmit.loop(level_mm);
+    return sensor.read();
   }
 
 private:
-  DisplayLine line;
   CurrentSensorReading sensor;
-  unsigned level_mm;
-  TransmitAverage transmit = TransmitAverage("depth_mm");
 
-  void setText()
+  void setText(uint32_t level_mm)
   {
-    char output[10] = {};
+    char output[16] = {};
     if (level_mm < 1000)
     {
       // under a meter, show in cm
-      snprintf(output, sizeof(output) - 1, "%02d.%1d cm", level_mm / 10, level_mm % 10);
+      snprintf(output, sizeof(output) - 1, "%02lu.%1lu cm", level_mm / 10, level_mm % 10);
     }
     else
     {
       // above a meter, show in m
-      snprintf(output, sizeof(output) - 1, "%2d.%02d m", level_mm / 1000, (level_mm/10) % 100);
+      snprintf(output, sizeof(output) - 1, "%2lu.%02lu m", level_mm / 1000, (level_mm/10) % 100);
     }
 
     line.setText("Level:", output);
   }
 };
 
-class Pressure
+class Pressure: public SensorInterface
 {
 public:
   Pressure(Display *display, unsigned screenLine, CurrentSensor *sensor)
-  : line(display, screenLine)
+  : SensorInterface(display, screenLine, "pressure_mbar")
     // water pressure sensor connected to output 1,
     // range 0-6bar, 0-6000 received in mbar
-  , sensor(sensor, 1, 0, 6000)
-  , mbar(0)
+  , sensor(sensor, 1, 0, 6000) { }
+
+  virtual SensorDecisionTriState decide(uint32_t pressure_mbar) override
   {
-    setText();
+    if (pressure_mbar > 5500)
+      return SensorDecisionTriState::OK_TO_STOP;
+    return SensorDecisionTriState::START;
   }
 
-  void readValue(void)
+protected:
+  uint32_t readValue(void)
   {
-    mbar = sensor.read();
-    setText();
-    transmit.loop(mbar);
+    return sensor.read();
   }
 
 private:
-  DisplayLine line;
   CurrentSensorReading sensor;
-  unsigned mbar;
   TransmitAverage transmit = TransmitAverage("pressure_mbar");
 
-  void setText(void)
+  void setText(uint32_t mbar)
   {
-    char output[10] = {};
-    snprintf(output, sizeof(output) - 1, "%01d.%2d bar", mbar / 1000, (mbar/10) % 100);
+    char output[16] = {};
+    snprintf(output, sizeof(output) - 1, "%01lu.%2lu bar", mbar / 1000, (mbar/10) % 100);
     line.setText("Pressure:", output);
   }
 };
@@ -425,11 +464,11 @@ private:
   }
 };
 
-class FlowRate
+class FlowRate: public SensorInterface
 {
 public:
   FlowRate(Display *display, unsigned screenLine, WaterMeter *meter)
-  : line(display, screenLine)
+  : SensorInterface(display, screenLine, "flow_lpm")
   , meter(meter)
   , lastPulseTime(System.millis())
   , flowLPM(0)
@@ -437,9 +476,16 @@ public:
   , startFlow(false)
   {
     meter->getAndResetCount();
-    setText();
   }
-  void readValue(void)
+  virtual SensorDecisionTriState decide(uint32_t flowLPM) override
+  {
+    if (flowLPM < 3)
+      return SensorDecisionTriState::OK_TO_STOP;
+    return SensorDecisionTriState::START;
+  }
+
+protected:
+  uint32_t readValue(void)
   {
     uint64_t currentTime = System.millis();
     uint32_t pulseTime = currentTime - lastPulseTime;
@@ -456,12 +502,12 @@ public:
         lastPulseTime = currentTime;
         noFlow = false;
         startFlow = true;
-        return;
+        return 0;
       }
       if (meter->getCount() == 0)
       {
         lastPulseTime = currentTime;
-        return;
+        return 0;
       }
 
       /* if there was more than one pulse, we assume the first as the "unknown",
@@ -473,13 +519,13 @@ public:
     {
       // estimate over more than a second
       if (pulseTime < 1000)
-        return;
+        return 0;
       if (meter->getCount() == 0)
       {
         // single pulse over a minute is considered as no flow
         if (pulseTime > 60000)
           noFlow = true;
-        return;
+        return 0;
       }
       pulses = meter->getAndResetCount();
       startFlow = false;
@@ -489,25 +535,24 @@ public:
       /* default case, flow already started
        * we want to round the value over some time to have more realistic average */
       if (pulseTime < 3000)
-        return;
+        return flowLPM;
        pulses = meter->getAndResetCount();
     }
     lastPulseTime = currentTime;
 
     flowLPM = pulses * 60 * 1000 / pulseTime;
     noFlow = pulses == 0;
-    setText();
-    transmit.loop(flowLPM);
+    return flowLPM;
   }
+
 private:
-  DisplayLine line;
   WaterMeter *meter;
   uint64_t lastPulseTime;
   uint32_t flowLPM;
   bool noFlow, startFlow;
-  TransmitAverage transmit = TransmitAverage("flow_lpm");
 
-  void setText(void)
+  // we are using the stored value, instead of the parameter, the value is the same
+  void setText(uint32_t)
   {
     char output[10] = {};
     snprintf(output, sizeof(output) - 1, "%2ld L/min", flowLPM);
@@ -523,6 +568,9 @@ public:
     pinMode(pin, OUTPUT);
     digitalWrite(pin, LOW);
   }
+protected:
+  friend class PumpControl;
+
   void set(bool high)
   {
     digitalWrite(pin, high ? HIGH : LOW);
@@ -531,41 +579,143 @@ private:
   const int pin;
 };
 
+class PumpControl
+{
+public:
+  PumpControl(Display *display, Relay *relay) : relay(relay)
+  {
+    pumpOnLine = new DisplayLine(display, 4);
+    setOff();
+
+    // Initialize buffer with zeros (pump "off" decisions)
+    historyBufer.resize(WINDOW_SIZE, 0);
+  }
+
+  void registerSensor(SensorInterface *sensor)
+  {
+    sensors.push_back(sensor);
+  }
+
+  void loop(void)
+  {
+    std::vector<SensorDecisionTriState> decisions(sensors.size());
+    int i = 0;
+
+    // read and decide for each sensor, this also updates the display
+    for (auto &sensor : sensors)
+    {
+      decisions[i++] = sensor->decide(sensor->read());
+    }
+
+    if( std::any_of(decisions.begin(), decisions.end(), [](SensorDecisionTriState d) { return d == SensorDecisionTriState::STOP; }) )
+    {
+      setOff();
+    }
+    if( std::any_of(decisions.begin(), decisions.end(), [](SensorDecisionTriState d) { return d == SensorDecisionTriState::START; }) )
+    {
+      setOn();
+    }
+    else
+    {
+      // all are SensorDecisionTriState::OK_TO_STOP
+      setOff();
+    }
+  }
+private:
+  std::vector<SensorInterface*> sensors;
+  DisplayLine *pumpOnLine;
+  Relay *relay;
+
+  static const int WINDOW_SIZE = 1800 * (1000 / DELAY_MS);  // 1/2 hour in loop instances
+  static const int MIN_ON_TIME = 90000; // 90 seconds
+  std::deque<int> historyBufer;       // Rolling window of decisions (0 or 1)
+  bool pumpState;                      // Current pump state (true = on, false = off)
+  uint64_t lastOnMs;                     // Time pump was last turned on
+
+  // Calculate fraction of "on" decisions in history buffer
+  double calculateHysteresisMetric() const {
+      auto sum = std::accumulate(historyBufer.begin(), historyBufer.end(), 0);
+      return static_cast<double>(sum) / historyBufer.size();
+  }
+
+  void setOn(void)
+  {
+    setPump(true);
+  }
+  void setOff(void)
+  {
+    setPump(false);
+  }
+  void setPump(bool on)
+  {
+    on = update(on);
+    relay->set(on);
+    pumpOnLine->setText("Pump:", on ? "ON " : "OFF");
+  }
+
+  bool update(bool decision, double threshold = 0.7)
+  {
+    historyBufer.pop_front();
+    historyBufer.push_back(decision ? 1 : 0);
+
+    // Pump is off
+    if (!pumpState)
+    {
+      if (decision)
+      {
+        pumpState = true;
+        lastOnMs = System.millis();
+      }
+      return pumpState;
+    }
+
+    // Stay on if decision is on
+    if (decision)
+      return true;
+
+    auto timeOn = System.millis() - lastOnMs;
+
+    // Force pump to stay on until min time reached
+    if (timeOn < MIN_ON_TIME)
+      return true;
+
+    // Turn off if decision is off and hysteresis metric is below threshold
+    pumpState = calculateHysteresisMetric() >= threshold;
+    return pumpState;
+  }
+};
+
+Display *display;
+
 CurrentSensor *currentSensor;
 WaterMeter *reedSensor;
 Relay *pumpRelay;
 
-WaterLevel *waterLevel;
-Pressure *pressure;
-FlowRate *flowRate;
-DisplayLine *pumpOnLine;
-
 DisplayTime *displayTime;
 
-Display *display;
+PumpControl *pumpControl;
 
 // setup() runs once, when the device is first turned on
 void setup(void)
 {
   Log.info("Setup..");
   Serial.begin(9600);
+
   currentSensor = new CurrentSensor();
-
   display = new Display(&epdDriver);
-
-  displayTime = new DisplayTime(display);
-
-  waterLevel = new WaterLevel(display, 1, currentSensor);
-  pressure = new Pressure(display, 2, currentSensor);
-
-  reedSensor = new WaterMeter(D10); // Lower pull-up resistance is better
-  flowRate = new FlowRate(display, 3, reedSensor);
-
-  pumpOnLine = new DisplayLine(display, 4);
-  pumpOnLine->setText("Pump:", "OFF");
 
   // The relay controls the pump power
   pumpRelay = new Relay(S4);
+
+  // Lower pull-up resistance is better
+  reedSensor = new WaterMeter(D10);
+
+  displayTime = new DisplayTime(display);
+  pumpControl = new PumpControl(display, pumpRelay);
+
+  pumpControl->registerSensor(new WaterLevel(display, 1, currentSensor));
+  pumpControl->registerSensor(new Pressure(display, 2, currentSensor));
+  pumpControl->registerSensor(new FlowRate(display, 3, reedSensor));
 }
 
 // loop() runs over and over again, as quickly as it can execute.
@@ -574,19 +724,8 @@ void loop(void)
   unsigned long long millis = System.millis();
 
   // TODO: display: Particle.connected();
-  bool high = false;
 
-  waterLevel->readValue();
-  pressure->readValue();
-  flowRate->readValue();
-
-  if ( ((Time.now() / 60) % 2 == 0) != high )
-  {
-    // change relay state
-    high = !high;
-  }
-  pumpRelay->set(high);
-  pumpOnLine->setText("Pump:", high ? "ON " : "OFF");
+  pumpControl->loop();
   displayTime->tick();
   display->tick();
 
