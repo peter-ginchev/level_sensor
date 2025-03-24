@@ -13,6 +13,7 @@ PRODUCT_VERSION(1);
 
 #include <list>
 #include <atomic>
+#include <functional>
 
 #include <Wire.h>
 
@@ -86,8 +87,13 @@ class DisplayLine : public DisplayLineInterface
 public:
   // Negative line numbers are counted from the bottom of the screen
   // Numbers start from 1 and -1
-  DisplayLine(Display *display, int line): display(display), line(line)
+  DisplayLine(Display *display, int line)
+  : display(display)
+  , line(line)
   {
+    gText = line > 0 ?
+      [](Screen_EPD *screen, uint16_t x0, uint16_t y0, String text) { screen->gTextLarge(x0, y0, text); } :
+      [](Screen_EPD *screen, uint16_t x0, uint16_t y0, String text) { screen->gText(x0, y0, text); };
     display->addLine(this);
   }
   void setText(String text)
@@ -108,18 +114,9 @@ protected:
   {
     updateCoordinates(screen);
 
-    if (line < 0)
-    {
-      screen->gText(x, y, text);
-      if (param.length() > 0)
-        screen->gText(x + 2*screen->stringSizeX(text + " "), y, param);
-    }
-    else
-    {
-      screen->gTextLarge(x, y, text);
-      if (param.length() > 0)
-        screen->gTextLarge(x + 2*screen->stringSizeX(text + " "), y, param);
-    }
+    gText(screen, x, y, text);
+    if (param.length() > 0)
+      gText(screen, x + 2*screen->stringSizeX(text + " "), y, param);
   }
 
 private:
@@ -133,6 +130,9 @@ private:
   const uint16_t yPitch = 10;
   uint16_t x, y;
 
+  using TextFunction = std::function<void(Screen_EPD *screen, uint16_t x0, uint16_t y0, String text)>;
+  TextFunction gText;
+
   void updateCoordinates(Screen_EPD *screen)
   {
     x = xOffset;
@@ -143,7 +143,8 @@ private:
   }
 };
 
-class DisplayTime {
+class DisplayTime
+{
 public:
   DisplayTime(Display *display): line(display, -1)
   {
@@ -173,7 +174,8 @@ private:
   }
 
   // Function to check if DST is active in Bulgaria (EU rules)
-  bool isNowDST(void) {
+  bool isNowDST(void)
+  {
     int month = Time.month();
     int day = Time.day();
     int dow = Time.weekday() - 1; // 0 = Sunday, 6 = Saturday
@@ -205,7 +207,8 @@ private:
   }
 };
 
-class TransmitAverage {
+class TransmitAverage
+{
 public:
   // Every minute transmission
   const int CYCLES_TRANSMIT_SECS = 60;
@@ -244,7 +247,8 @@ private:
   unsigned samples_count = 0;
 };
 
-class CurrentSensor {
+class CurrentSensor
+{
 public:
   CurrentSensor(void)
   {
@@ -305,7 +309,8 @@ private:
   uint64_t range;
 };
 
-class WaterLevel {
+class WaterLevel
+{
 public:
   WaterLevel(Display *display, unsigned screenLine, CurrentSensor *sensor)
   : line(display, screenLine)
@@ -313,7 +318,9 @@ public:
     // range 0-10m, 0-10000 received in mm
   , sensor(sensor, 0, 0, 10000)
   , level_mm(0)
-  {}
+  {
+    setText();
+  }
 
   void readValue(void)
   {
@@ -346,7 +353,8 @@ private:
   }
 };
 
-class Pressure {
+class Pressure
+{
 public:
   Pressure(Display *display, unsigned screenLine, CurrentSensor *sensor)
   : line(display, screenLine)
@@ -354,7 +362,9 @@ public:
     // range 0-6bar, 0-6000 received in mbar
   , sensor(sensor, 1, 0, 6000)
   , mbar(0)
-  {}
+  {
+    setText();
+  }
 
   void readValue(void)
   {
@@ -369,7 +379,7 @@ private:
   unsigned mbar;
   TransmitAverage transmit = TransmitAverage("pressure_mbar");
 
-  void setText()
+  void setText(void)
   {
     char output[10] = {};
     snprintf(output, sizeof(output) - 1, "%01d.%2d bar", mbar / 1000, (mbar/10) % 100);
@@ -377,7 +387,8 @@ private:
   }
 };
 
-class WaterMeter {
+class WaterMeter
+{
 public:
   WaterMeter(int pin)
   {
@@ -414,7 +425,8 @@ private:
   }
 };
 
-class FlowRate {
+class FlowRate
+{
 public:
   FlowRate(Display *display, unsigned screenLine, WaterMeter *meter)
   : line(display, screenLine)
@@ -425,29 +437,39 @@ public:
   , startFlow(false)
   {
     meter->getAndResetCount();
+    setText();
   }
   void readValue(void)
   {
     uint64_t currentTime = System.millis();
     uint32_t pulseTime = currentTime - lastPulseTime;
-    // we want to round the value over some time to have more realistic average
-    if (pulseTime < 3000 && !noFlow && !startFlow)
-      return;
+    uint32_t pulses = 0;
+
     if (noFlow)
     {
       /* if we didn't have a flow and receive a pulse, it's hard to estimate the flow rate
        * so we have a flag that helps us to avoid looking at the first pulse and
        * estimate over a long period, when it just started.
        * If it was a single pulse over some large period, we consider it as no flow */
-      if (meter->getAndResetCount() > 0)
+      if (meter->getCount() == 1)
       {
         lastPulseTime = currentTime;
         noFlow = false;
         startFlow = true;
+        return;
       }
-      return;
+      if (meter->getCount() == 0)
+      {
+        lastPulseTime = currentTime;
+        return;
+      }
+
+      /* if there was more than one pulse, we assume the first as the "unknown",
+       * so, it's deduced and the other are assumed to has happened since the last check */
+      pulses = meter->getAndResetCount() - 1;
+      noFlow = false;
     }
-    if (startFlow)
+    else if (startFlow)
     {
       // estimate over more than a second
       if (pulseTime < 1000)
@@ -459,9 +481,17 @@ public:
           noFlow = true;
         return;
       }
+      pulses = meter->getAndResetCount();
       startFlow = false;
     }
-    uint32_t pulses = meter->getAndResetCount();
+    else
+    {
+      /* default case, flow already started
+       * we want to round the value over some time to have more realistic average */
+      if (pulseTime < 3000)
+        return;
+       pulses = meter->getAndResetCount();
+    }
     lastPulseTime = currentTime;
 
     flowLPM = pulses * 60 * 1000 / pulseTime;
@@ -477,15 +507,16 @@ private:
   bool noFlow, startFlow;
   TransmitAverage transmit = TransmitAverage("flow_lpm");
 
-  void setText()
+  void setText(void)
   {
     char output[10] = {};
-    snprintf(output, sizeof(output) - 1, "%2ld L/sec", flowLPM);
+    snprintf(output, sizeof(output) - 1, "%2ld L/min", flowLPM);
     line.setText("Flow:", output);
   }
 };
 
-class Relay {
+class Relay
+{
 public:
   Relay(int pin): pin(pin)
   {
@@ -514,7 +545,8 @@ DisplayTime *displayTime;
 Display *display;
 
 // setup() runs once, when the device is first turned on
-void setup() {
+void setup(void)
+{
   Log.info("Setup..");
   Serial.begin(9600);
   currentSensor = new CurrentSensor();
@@ -537,7 +569,8 @@ void setup() {
 }
 
 // loop() runs over and over again, as quickly as it can execute.
-void loop() {
+void loop(void)
+{
   unsigned long long millis = System.millis();
 
   // TODO: display: Particle.connected();
