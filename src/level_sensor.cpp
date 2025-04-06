@@ -339,7 +339,7 @@ public:
     displayName += ":";
   }
 
-  virtual SensorDecisionTriState decide(uint32_t value) = 0;
+  virtual SensorDecisionTriState decide(uint32_t value, bool pumpOn) = 0;
 
   uint32_t update_and_get(void)
   {
@@ -370,7 +370,7 @@ public:
     // range 0-10m, 0-10000 received in mm
   , sensor(sensor, 0, 0, 10000) { }
 
-  virtual SensorDecisionTriState decide(uint32_t level_mm) override
+  virtual SensorDecisionTriState decide(uint32_t level_mm, bool pumpOn) override
   {
     /* Water level is used just as preventive -- if level is low, stop before dry pump overheats */
     if (level_mm < 1500)
@@ -413,11 +413,15 @@ public:
     // range 0-6bar, 0-6000 received in mbar
   , sensor(sensor, 1, 0, 6000) { }
 
-  virtual SensorDecisionTriState decide(uint32_t pressure_mbar) override
+  virtual SensorDecisionTriState decide(uint32_t pressure_mbar, bool pumpOn) override
   {
-    /* Low pressure keeps the pump on,
+    /* Pressure below designed high pressure keeps the pump on,
      * the pump will stop when pressure is high and the flow is very low */
-    if (pressure_mbar < 5500)
+    if (pumpOn && pressure_mbar < 5000)
+      return SensorDecisionTriState::START;
+    /* The pump will start just when there could be no time to spool the pump, w/o experiencing it,
+     * Otherwise high flow rate will start it anyway */
+    if (!pumpOn && pressure_mbar < 4000)
       return SensorDecisionTriState::START;
     return SensorDecisionTriState::OK_TO_STOP;
 }
@@ -490,7 +494,7 @@ public:
   {
     meter->getAndResetCount();
   }
-  virtual SensorDecisionTriState decide(uint32_t flowLPM) override
+  virtual SensorDecisionTriState decide(uint32_t flowLPM, bool pumpOn) override
   {
     /* Flow rate starts the pump, immediately after there's a significant flow,
      * the pump is expected to stop, when the flow is low and the pressure has built up */
@@ -619,7 +623,7 @@ public:
     for (auto &sensor : sensors)
     {
       uint32_t value = sensor->update_and_get();
-      decisions[i++] = sensor->decide(value);
+      decisions[i++] = sensor->decide(value, pumpState);
     }
 
     if (std::any_of(decisions.begin(), decisions.end(),
