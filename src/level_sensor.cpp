@@ -258,7 +258,7 @@ public:
     ads.begin();
   }
 protected:
-  friend class CurrentSensorReading;
+  friend class CurrentSensorChannel;
 
   uint16_t read(uint8_t id)
   {
@@ -268,10 +268,10 @@ private:
   Adafruit_ADS1115 ads;  /* Use this for the 16-bit version */
 };
 
-class CurrentSensorReading
+class CurrentSensorChannel
 {
 public:
-  CurrentSensorReading(CurrentSensor *sensor, uint8_t id, uint64_t min, uint64_t max)
+  CurrentSensorChannel(CurrentSensor *sensor, uint8_t id, uint64_t min, uint64_t max)
   : sensor(sensor), id(id)
   {
     setRange(min, max);
@@ -321,39 +321,50 @@ enum class SensorDecisionTriState
 class SensorInterface
 {
 public:
-  SensorInterface(Display *display, unsigned screenLine, String transmitName)
-  : line(display, screenLine), transmit(transmitName)
+  SensorInterface(Display *display, unsigned screenLine, String name, String transmitName)
+  : line(display, screenLine), displayName(name), transmit(transmitName)
   {
-    setText(0);
+    line.setText("N/A");
+    if (displayName.length() > displayLen)
+    {
+      // abbreviate
+      displayName = displayName.substring(0, displayLen - 1) + ".";
+    }
+    else if (displayName.length() < displayLen) {
+      // pad with spaces
+      for (unsigned i = displayName.length(); i < displayLen; i++)
+        displayName += ' ';
+    }
+    displayName += ":";
   }
 
   virtual SensorDecisionTriState decide(uint32_t value) = 0;
 
-  uint32_t read(void)
+  uint32_t update_and_get(void)
   {
     uint32_t value = readValue();
-    setText(value);
+    String txtValue = getText(value);
+    line.setText(displayName, txtValue);
     transmit.loop(value);
     return value;
   }
+
 protected:
-  DisplayLine line;
-
   virtual uint32_t readValue(void) = 0;
-private:
-  TransmitAverage transmit;
+  virtual String getText(uint32_t) = 0;
 
-  virtual void setText(uint32_t)
-  {
-    line.setText("N/A");
-  }
+private:
+  DisplayLine line;
+  String displayName;
+  TransmitAverage transmit;
+  const unsigned displayLen = 6;
 };
 
 class WaterLevel: public SensorInterface
 {
 public:
   WaterLevel(Display *display, unsigned screenLine, CurrentSensor *sensor)
-  : SensorInterface(display, screenLine, "depth_mm")
+  : SensorInterface(display, screenLine, "Level", "depth_mm")
     // hydrostatic pressure sensor connected to output 0,
     // range 0-10m, 0-10000 received in mm
   , sensor(sensor, 0, 0, 10000) { }
@@ -366,37 +377,36 @@ public:
   }
 
 protected:
-  uint32_t readValue(void)
+  uint32_t readValue(void) override
   {
     return sensor.read();
   }
 
-private:
-  CurrentSensorReading sensor;
-
-  void setText(uint32_t level_mm)
+  virtual String getText(uint32_t level_mm) override
   {
     char output[16] = {};
     if (level_mm < 1000)
     {
       // under a meter, show in cm
-      snprintf(output, sizeof(output) - 1, "%02lu.%1lu cm", level_mm / 10, level_mm % 10);
+      snprintf(output, sizeof(output) - 1, "%2lu.%1lu cm", level_mm / 10, level_mm % 10);
     }
     else
     {
       // above a meter, show in m
       snprintf(output, sizeof(output) - 1, "%2lu.%02lu m", level_mm / 1000, (level_mm/10) % 100);
     }
-
-    line.setText("Level:", output);
+    return output;
   }
+
+private:
+  CurrentSensorChannel sensor;
 };
 
 class Pressure: public SensorInterface
 {
 public:
   Pressure(Display *display, unsigned screenLine, CurrentSensor *sensor)
-  : SensorInterface(display, screenLine, "pressure_mbar")
+  : SensorInterface(display, screenLine, "Pressure", "pressure_mbar")
     // water pressure sensor connected to output 1,
     // range 0-6bar, 0-6000 received in mbar
   , sensor(sensor, 1, 0, 6000) { }
@@ -409,21 +419,20 @@ public:
   }
 
 protected:
-  uint32_t readValue(void)
+  uint32_t readValue(void) override
   {
     return sensor.read();
   }
 
-private:
-  CurrentSensorReading sensor;
-  TransmitAverage transmit = TransmitAverage("pressure_mbar");
-
-  void setText(uint32_t mbar)
+  virtual String getText(uint32_t mbar) override
   {
     char output[16] = {};
-    snprintf(output, sizeof(output) - 1, "%01lu.%2lu bar", mbar / 1000, (mbar/10) % 100);
-    line.setText("Pressure:", output);
+    snprintf(output, sizeof(output) - 1, "%01lu.%02lu bar", mbar / 1000, (mbar/10) % 100);
+    return output;
   }
+
+private:
+  CurrentSensorChannel sensor;
 };
 
 class WaterMeter
@@ -468,7 +477,7 @@ class FlowRate: public SensorInterface
 {
 public:
   FlowRate(Display *display, unsigned screenLine, WaterMeter *meter)
-  : SensorInterface(display, screenLine, "flow_lpm")
+  : SensorInterface(display, screenLine, "Flow", "flow_lpm")
   , meter(meter)
   , lastPulseTime(System.millis())
   , flowLPM(0)
@@ -485,7 +494,7 @@ public:
   }
 
 protected:
-  uint32_t readValue(void)
+  uint32_t readValue(void) override
   {
     uint64_t currentTime = System.millis();
     uint32_t pulseTime = currentTime - lastPulseTime;
@@ -545,19 +554,19 @@ protected:
     return flowLPM;
   }
 
+  // we are using the stored value, instead of the parameter, the value is the same
+  virtual String getText(uint32_t) override
+  {
+    char output[10] = {};
+    snprintf(output, sizeof(output) - 1, "%2ld L/min", flowLPM);
+    return output;
+  }
+
 private:
   WaterMeter *meter;
   uint64_t lastPulseTime;
   uint32_t flowLPM;
   bool noFlow, startFlow;
-
-  // we are using the stored value, instead of the parameter, the value is the same
-  void setText(uint32_t)
-  {
-    char output[10] = {};
-    snprintf(output, sizeof(output) - 1, "%2ld L/min", flowLPM);
-    line.setText("Flow:", output);
-  }
 };
 
 class Relay
@@ -582,7 +591,7 @@ private:
 class PumpControl
 {
 public:
-  PumpControl(Display *display, Relay *relay) : relay(relay)
+  PumpControl(Display *display, Relay *relay): relay(relay)
   {
     pumpOnLine = new DisplayLine(display, 4);
     setOff();
@@ -601,23 +610,27 @@ public:
     std::vector<SensorDecisionTriState> decisions(sensors.size());
     int i = 0;
 
-    // read and decide for each sensor, this also updates the display
     for (auto &sensor : sensors)
     {
-      decisions[i++] = sensor->decide(sensor->read());
+      uint32_t value = sensor->update_and_get();
+      decisions[i++] = sensor->decide(value);
     }
 
-    if( std::any_of(decisions.begin(), decisions.end(), [](SensorDecisionTriState d) { return d == SensorDecisionTriState::STOP; }) )
+    if (std::any_of(decisions.begin(), decisions.end(),
+        [](SensorDecisionTriState d) { return d == SensorDecisionTriState::STOP; }))
     {
+      // if any sensor says to stop, we stop
       setOff();
     }
-    if( std::any_of(decisions.begin(), decisions.end(), [](SensorDecisionTriState d) { return d == SensorDecisionTriState::START; }) )
+    else if (std::any_of(decisions.begin(), decisions.end(),
+             [](SensorDecisionTriState d) { return d == SensorDecisionTriState::START; }))
     {
+      // if any sensor says to start and no sensor says 'stop', we start
       setOn();
     }
     else
     {
-      // all are SensorDecisionTriState::OK_TO_STOP
+      // all sensors say to stop
       setOff();
     }
   }
@@ -648,9 +661,10 @@ private:
   }
   void setPump(bool on)
   {
-    on = update(on);
-    relay->set(on);
-    pumpOnLine->setText("Pump:", on ? "ON " : "OFF");
+    bool keepOn = update(on);
+    relay->set(keepOn);
+    // print spaces in order to clear the previous text
+    pumpOnLine->setText("Pump  :", on ? "ON       " : (keepOn ? "ON (hist)" : "OFF      "));
   }
 
   bool update(bool decision, double threshold = 0.7)
@@ -658,20 +672,22 @@ private:
     historyBufer.pop_front();
     historyBufer.push_back(decision ? 1 : 0);
 
-    // Pump is off
-    if (!pumpState)
+    // Stay on if decision is on
+    if (decision)
     {
-      if (decision)
+      if (!pumpState)
       {
         pumpState = true;
         lastOnMs = System.millis();
       }
-      return pumpState;
+      return true;
     }
 
-    // Stay on if decision is on
-    if (decision)
-      return true;
+    // Pump is off
+    if (!pumpState)
+      return false;
+
+    // decision is off, but we need to check the hysteresis
 
     auto timeOn = System.millis() - lastOnMs;
 
