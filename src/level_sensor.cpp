@@ -325,6 +325,7 @@ public:
   : line(display, screenLine), displayName(name), transmit(transmitName)
   {
     line.setText("N/A");
+    // Aligning all display names to the same length
     if (displayName.length() > displayLen)
     {
       // abbreviate
@@ -357,7 +358,7 @@ private:
   DisplayLine line;
   String displayName;
   TransmitAverage transmit;
-  const unsigned displayLen = 6;
+  static constexpr unsigned displayLen = 6;
 };
 
 class WaterLevel: public SensorInterface
@@ -371,6 +372,7 @@ public:
 
   virtual SensorDecisionTriState decide(uint32_t level_mm) override
   {
+    /* Water level is used just as preventive -- if level is low, stop before dry pump overheats */
     if (level_mm < 1500)
       return SensorDecisionTriState::STOP;
     return SensorDecisionTriState::OK_TO_STOP;
@@ -413,10 +415,12 @@ public:
 
   virtual SensorDecisionTriState decide(uint32_t pressure_mbar) override
   {
-    if (pressure_mbar > 5500)
-      return SensorDecisionTriState::OK_TO_STOP;
-    return SensorDecisionTriState::START;
-  }
+    /* Low pressure keeps the pump on,
+     * the pump will stop when pressure is high and the flow is very low */
+    if (pressure_mbar < 5500)
+      return SensorDecisionTriState::START;
+    return SensorDecisionTriState::OK_TO_STOP;
+}
 
 protected:
   uint32_t readValue(void) override
@@ -488,9 +492,11 @@ public:
   }
   virtual SensorDecisionTriState decide(uint32_t flowLPM) override
   {
-    if (flowLPM < 3)
-      return SensorDecisionTriState::OK_TO_STOP;
-    return SensorDecisionTriState::START;
+    /* Flow rate starts the pump, immediately after there's a significant flow,
+     * the pump is expected to stop, when the flow is low and the pressure has built up */
+    if (flowLPM > 5)
+      return SensorDecisionTriState::START;
+    return SensorDecisionTriState::OK_TO_STOP;
   }
 
 protected:
