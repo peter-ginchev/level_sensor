@@ -339,7 +339,7 @@ public:
     displayName += ":";
   }
 
-  virtual SensorDecisionTriState decide(uint32_t value, bool pumpOn) = 0;
+  virtual SensorDecisionTriState decide(uint32_t value, bool lastPumpOn) = 0;
 
   uint32_t update_and_get(void)
   {
@@ -370,7 +370,7 @@ public:
     // range 0-10m, 0-10000 received in mm
   , sensor(sensor, 0, 0, 10000) { }
 
-  virtual SensorDecisionTriState decide(uint32_t level_mm, bool pumpOn) override
+  virtual SensorDecisionTriState decide(uint32_t level_mm, bool lastPumpOn) override
   {
     /* Water level is used just as preventive -- if level is low, stop before dry pump overheats */
     if (level_mm < 1500)
@@ -413,15 +413,15 @@ public:
     // range 0-6bar, 0-6000 received in mbar
   , sensor(sensor, 1, 0, 6000) { }
 
-  virtual SensorDecisionTriState decide(uint32_t pressure_mbar, bool pumpOn) override
+  virtual SensorDecisionTriState decide(uint32_t pressure_mbar, bool lastPumpOn) override
   {
     /* Pressure below designed high pressure keeps the pump on,
      * the pump will stop when pressure is high and the flow is very low */
-    if (pumpOn && pressure_mbar < 5000)
+    if (lastPumpOn && pressure_mbar < 5000)
       return SensorDecisionTriState::START;
     /* The pump will start just when there could be no time to spool the pump, w/o experiencing it,
      * Otherwise high flow rate will start it anyway */
-    if (!pumpOn && pressure_mbar < 4000)
+    if (!lastPumpOn && pressure_mbar < 4000)
       return SensorDecisionTriState::START;
     return SensorDecisionTriState::OK_TO_STOP;
 }
@@ -494,7 +494,7 @@ public:
   {
     meter->getAndResetCount();
   }
-  virtual SensorDecisionTriState decide(uint32_t flowLPM, bool pumpOn) override
+  virtual SensorDecisionTriState decide(uint32_t flowLPM, bool lastPumpOn) override
   {
     /* Flow rate starts the pump, immediately after there's a significant flow,
      * the pump is expected to stop, when the flow is low and the pressure has built up */
