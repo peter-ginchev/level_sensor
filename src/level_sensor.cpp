@@ -96,6 +96,9 @@ public:
     gText = line > 0 ?
       [](Screen_EPD *screen, uint16_t x0, uint16_t y0, String text) { screen->gTextLarge(x0, y0, text); } :
       [](Screen_EPD *screen, uint16_t x0, uint16_t y0, String text) { screen->gText(x0, y0, text); };
+    stringSizeX = line > 0 ?
+      [](Screen_EPD *screen, String text) -> uint16_t { return screen->stringSizeX(text) * 2; } :
+      [](Screen_EPD *screen, String text) -> uint16_t { return screen->stringSizeX(text); };
     display->addLine(this);
   }
   void setText(String text)
@@ -116,24 +119,29 @@ protected:
   {
     updateCoordinates(screen);
 
+    // TODO: write main text once, if there's a param,
+    // calculate the space of the max param, to be able to erase the rest
+
     gText(screen, x, y, text);
     if (param.length() > 0)
-      gText(screen, x + 2*screen->stringSizeX(text + " "), y, param);
+      gText(screen, x + stringSizeX(screen, text + " "), y, param);
   }
 
 private:
   Display *display;
-  int line;
+  const int line;
 
   String text, param;
 
   const uint16_t xOffset = 10;
   const uint16_t yOffset = 10;
-  const uint16_t yPitch = 10;
+  static constexpr uint16_t yPitch = 10;
   uint16_t x, y;
 
   using TextFunction = std::function<void(Screen_EPD *screen, uint16_t x0, uint16_t y0, String text)>;
+  using SizeFunction = std::function<uint16_t(Screen_EPD *screen, String)>;
   TextFunction gText;
+  SizeFunction stringSizeX;
 
   void updateCoordinates(Screen_EPD *screen)
   {
@@ -303,10 +311,10 @@ private:
     return min + (zero_based*inc_denom*range)/(inc_nom*inc_output);
   }
 private:
-  static const uint16_t zero_value = 6425;
-  static const uint64_t inc_nom = 643;
-  static const uint64_t inc_denom = 250;
-  static const uint64_t inc_output = 10000;
+  static constexpr uint16_t zero_value = 6425;
+  static constexpr uint64_t inc_nom = 643;
+  static constexpr uint64_t inc_denom = 250;
+  static constexpr uint64_t inc_output = 10000;
   uint64_t min;
   uint64_t range;
 };
@@ -419,10 +427,17 @@ public:
      * the pump will stop when pressure is high and the flow is very low */
     if (lastPumpOn && pressure_mbar < 5000)
       return SensorDecisionTriState::START;
+
     /* The pump will start just when there could be no time to spool the pump, w/o experiencing it,
-     * Otherwise high flow rate will start it anyway */
-    if (!lastPumpOn && pressure_mbar < 4000)
+     * Otherwise high flow rate will start it anyway, if 3.5bar won't be enough, could be raised to 4bar */
+    if (!lastPumpOn && pressure_mbar < 3500)
       return SensorDecisionTriState::START;
+
+    /* There's a protection of high pressure, stop the pump in order to avoid damage, for example
+     * the installed membrane tank max pressure could be as low as 8.6 bar */
+    if (pressure_mbar > 7500)
+      return SensorDecisionTriState::STOP;
+
     return SensorDecisionTriState::OK_TO_STOP;
 }
 
@@ -604,10 +619,12 @@ public:
   PumpControl(Display *display, Relay *relay): relay(relay)
   {
     pumpOnLine = new DisplayLine(display, 4);
+    statusLine = new DisplayLine(display, -2);
     setOff();
 
     // Initialize buffer with zeros (pump "off" decisions)
     historyBufer.resize(WINDOW_SIZE, 0);
+    pumpOnInHourBuffer.resize(HOUR_WINDOW_SIZE, 0);
   }
 
   void registerSensor(SensorInterface *sensor)
@@ -630,6 +647,7 @@ public:
         [](SensorDecisionTriState d) { return d == SensorDecisionTriState::STOP; }))
     {
       // if any sensor says to stop, we stop
+      // TODO: stop should be immediate, not confirming to min run length or hysteresis
       setOff();
     }
     else if (std::any_of(decisions.begin(), decisions.end(),
@@ -640,20 +658,23 @@ public:
     }
     else
     {
-      // all sensors say to stop
+      // no sensor says to start or stop, so we can stop, ...
       setOff();
     }
   }
 private:
   std::vector<SensorInterface*> sensors;
   DisplayLine *pumpOnLine;
+  DisplayLine *statusLine;
   Relay *relay;
 
-  static const int WINDOW_SIZE = 1800 * (1000 / DELAY_MS);  // 1/2 hour in loop instances
-  static const int MIN_ON_TIME = 90000; // 90 seconds
-  std::deque<int> historyBufer;       // Rolling window of decisions (0 or 1)
-  bool pumpState;                      // Current pump state (true = on, false = off)
-  uint64_t lastOnMs;                     // Time pump was last turned on
+  static constexpr int HOUR_WINDOW_SIZE = 3600 * (1000 / DELAY_MS);
+  static constexpr int WINDOW_SIZE = HOUR_WINDOW_SIZE / 3;  // 20 min look-back buffer
+  static constexpr int MIN_ON_TIME = 90000; // 90 seconds
+  std::deque<int> historyBufer;         // Rolling window of decisions (0 or 1)
+  std::deque<int> pumpOnInHourBuffer;   // Hour long Rolling window of turn on, used to count the on/off switches
+  bool pumpState;                       // Current pump state (true = on, false = off)
+  uint64_t lastOnMs;                    // Time pump was last turned on
 
   // Calculate fraction of "on" decisions in history buffer
   double calculateHysteresisMetric() const {
@@ -669,19 +690,45 @@ private:
   {
     setPump(false);
   }
+
+  void countOnTimes(void)
+  {
+    static bool pumpLastOn = false;
+    static uint16_t lastRunTimeSecs = 0;
+    char output[50] = {};
+    bool turnedOn = !pumpState && pumpLastOn;
+
+    pumpOnInHourBuffer.pop_front();
+    pumpOnInHourBuffer.push_back(turnedOn ? 1 : 0);
+    // the run time will be updated as long as the pump is on
+    if (pumpLastOn)
+    {
+      // pumpState is updated on the next cycle, but since we truncate it, keep the calc like this
+      lastRunTimeSecs = (System.millis() - lastOnMs) / 1000;
+    }
+    pumpLastOn = pumpState;
+
+    int onCounter = std::accumulate(pumpOnInHourBuffer.begin(), pumpOnInHourBuffer.end(), 0);
+    snprintf(output, sizeof(output) - 1, "Pump on counter: %2d, run time: %3d:%02d",
+                                         onCounter, lastRunTimeSecs / 60, lastRunTimeSecs % 60);
+    statusLine->setText(output);
+  }
+
   void setPump(bool on)
   {
-    bool keepOn = update(on);
+    countOnTimes();
+    bool keepOn = decideKeepOn(on);
+
+    historyBufer.pop_front();
+    historyBufer.push_back(keepOn ? 1 : 0);
+
     relay->set(keepOn);
     // print spaces in order to clear the previous text
     pumpOnLine->setText("Pump  :", on ? "ON       " : (keepOn ? "ON (hist)" : "OFF      "));
   }
 
-  bool update(bool decision, double threshold = 0.7)
+  bool decideKeepOn(bool decision, double threshold = 0.5)
   {
-    historyBufer.pop_front();
-    historyBufer.push_back(decision ? 1 : 0);
-
     // Stay on if decision is on
     if (decision)
     {
