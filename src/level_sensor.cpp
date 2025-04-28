@@ -702,7 +702,7 @@ private:
     static bool pumpLastOn = false;
     static uint16_t lastRunTimeSecs = 0;
     char output[50] = {};
-    bool turnedOn = !pumpState && pumpLastOn;
+    bool turnedOn = pumpState && !pumpLastOn;
 
     pumpOnInHourBuffer.pop_front();
     pumpOnInHourBuffer.push_back(turnedOn ? 1 : 0);
