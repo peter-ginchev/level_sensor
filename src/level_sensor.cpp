@@ -646,9 +646,8 @@ public:
     if (std::any_of(decisions.begin(), decisions.end(),
         [](SensorDecisionTriState d) { return d == SensorDecisionTriState::STOP; }))
     {
-      // if any sensor says to stop, we stop
-      // TODO: stop should be immediate, not confirming to min run length or hysteresis
-      setOff();
+      // if any sensor says to stop, we stop, immediately
+      forceOff();
     }
     else if (std::any_of(decisions.begin(), decisions.end(),
              [](SensorDecisionTriState d) { return d == SensorDecisionTriState::START; }))
@@ -671,6 +670,7 @@ private:
   static constexpr int HOUR_WINDOW_SIZE = 3600 * (1000 / DELAY_MS);
   static constexpr int WINDOW_SIZE = HOUR_WINDOW_SIZE / 3;  // 20 min look-back buffer
   static constexpr int MIN_ON_TIME = 90000; // 90 seconds
+  static constexpr float HYST_THRESHOLD = 0.5; // the percentage of the WINDOW_SIZE time, if above the pump will stay on
   std::deque<int> historyBufer;         // Rolling window of decisions (0 or 1)
   std::deque<int> pumpOnInHourBuffer;   // Hour long Rolling window of turn on, used to count the on/off switches
   bool pumpState;                       // Current pump state (true = on, false = off)
@@ -686,9 +686,15 @@ private:
   {
     setPump(true);
   }
+
   void setOff(void)
   {
     setPump(false);
+  }
+
+  void forceOff(void)
+  {
+    setPump(false, true);
   }
 
   void countOnTimes(void)
@@ -714,29 +720,44 @@ private:
     statusLine->setText(output);
   }
 
-  void setPump(bool on)
+  void setPump(bool on, bool force=false)
   {
-    countOnTimes();
-    bool keepOn = decideKeepOn(on);
+    bool keepOn;
+    String onReason;
 
+    countOnTimes();
+    if (!force)
+    {
+      keepOn = decideKeepOn(on);
+      onReason = "time";
+    }
+    else
+      keepOn = on;
+
+    // Update hysteresis look-back
     historyBufer.pop_front();
     historyBufer.push_back(keepOn ? 1 : 0);
 
+    if (!force && !keepOn)
+    {
+      // Keep on if decision is off and hysteresis metric is above threshold
+      keepOn = calculateHysteresisMetric() >= HYST_THRESHOLD;
+      onReason = "hist";
+    }
+
     relay->set(keepOn);
+    pumpState = keepOn;
     // print spaces in order to clear the previous text
-    pumpOnLine->setText("Pump  :", on ? "ON       " : (keepOn ? "ON (hist)" : "OFF      "));
+    pumpOnLine->setText("Pump  :", on ? "ON       " : (keepOn ? "ON (" + onReason + ")" : "OFF      "));
   }
 
-  bool decideKeepOn(bool decision, double threshold = 0.5)
+  bool decideKeepOn(bool decision)
   {
     // Stay on if decision is on
     if (decision)
     {
       if (!pumpState)
-      {
-        pumpState = true;
         lastOnMs = System.millis();
-      }
       return true;
     }
 
@@ -744,17 +765,11 @@ private:
     if (!pumpState)
       return false;
 
-    // decision is off, but we need to check the hysteresis
-
+    // decision is off, but there's a minimum running time we should comply
     auto timeOn = System.millis() - lastOnMs;
 
     // Force pump to stay on until min time reached
-    if (timeOn < MIN_ON_TIME)
-      return true;
-
-    // Turn off if decision is off and hysteresis metric is below threshold
-    pumpState = calculateHysteresisMetric() >= threshold;
-    return pumpState;
+    return timeOn < MIN_ON_TIME;
   }
 };
 
