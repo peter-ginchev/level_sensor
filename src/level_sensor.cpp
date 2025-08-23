@@ -435,7 +435,7 @@ public:
 
     /* There's a protection of high pressure, stop the pump in order to avoid damage, for example
      * the installed membrane tank max pressure could be as low as 8.6 bar */
-    if (pressure_mbar > 7500)
+    if (pressure_mbar > 6000)
       return SensorDecisionTriState::STOP;
 
     return SensorDecisionTriState::OK_TO_STOP;
@@ -715,7 +715,7 @@ private:
     pumpLastOn = pumpState;
 
     int onCounter = std::accumulate(pumpOnInHourBuffer.begin(), pumpOnInHourBuffer.end(), 0);
-    snprintf(output, sizeof(output) - 1, "Pump on counter: %2d, run time: %3d:%02d",
+    snprintf(output, sizeof(output) - 1, "ON counter: %2d, run: %3d:%02d",
                                          onCounter, lastRunTimeSecs / 60, lastRunTimeSecs % 60);
     statusLine->setText(output);
   }
@@ -748,7 +748,7 @@ private:
     relay->set(keepOn);
     pumpState = keepOn;
     // print spaces in order to clear the previous text
-    pumpOnLine->setText("Pump  :", on ? "ON       " : (keepOn ? "ON (" + onReason + ")" : "OFF      "));
+    pumpOnLine->setText("Pump  :", on ? "ON      " : (keepOn ? "ON/ " + onReason : "OFF     "));
   }
 
   bool decideKeepOn(bool decision)
