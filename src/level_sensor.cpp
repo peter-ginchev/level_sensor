@@ -478,16 +478,16 @@ public:
   }
 
 private:
-  const uint32_t debounceMs = 30;
-  std::atomic_uint32_t pulseCount = 0;
+  static constexpr uint32_t DEBOUNCE_MS = 30;
+  volatile std::atomic_uint32_t pulseCount = 0;
+  uint64_t lastPulse = 0; // Note: used only inside an ATOMIC_BLOCK
 
   void pulseInterrupt(void)
   {
-    static uint32_t lastPulse;
-    uint32_t currentTime = millis();
+    uint64_t currentTime = System.millis();
 
     ATOMIC_BLOCK() {
-      if (currentTime - lastPulse < debounceMs)
+      if (currentTime - lastPulse < DEBOUNCE_MS)
         return;
       lastPulse = currentTime;
     }
@@ -496,7 +496,7 @@ private:
   }
 };
 
-class FlowRate: public SensorInterface
+class FlowRate : public SensorInterface
 {
 public:
   FlowRate(Display *display, unsigned screenLine, WaterMeter *meter)
@@ -504,78 +504,117 @@ public:
   , meter(meter)
   , lastPulseTime(System.millis())
   , flowLPM(0)
+  , msPerLiter(0)
+  , noPulseTimeMs(0)
   , noFlow(true)
-  , startFlow(false)
+  , historyIndex(0)
+  , historyCount(0)
   {
     meter->getAndResetCount();
   }
+
   virtual SensorDecisionTriState decide(uint32_t flowLPM, bool lastPumpOn) override
   {
     /* Flow rate starts the pump, immediately after there's a significant flow,
      * the pump is expected to stop, when the flow is low and the pressure has built up */
-    if (flowLPM > 5)
+    if (flowLPM > 12)
       return SensorDecisionTriState::START;
     return SensorDecisionTriState::OK_TO_STOP;
   }
 
 protected:
-  uint32_t readValue(void) override
+  uint32_t calcAverageMsPerLiter(uint32_t pulseTime, uint32_t pulses)
   {
-    uint64_t currentTime = System.millis();
-    uint32_t pulseTime = currentTime - lastPulseTime;
-    uint32_t pulses = 0;
-
-    if (noFlow)
+    constexpr uint8_t HISTORY_SIZE = 3;
+    if (historyCount < HISTORY_SIZE)
     {
-      /* if we didn't have a flow and receive a pulse, it's hard to estimate the flow rate
-       * so we have a flag that helps us to avoid looking at the first pulse and
-       * estimate over a long period, when it just started.
-       * If it was a single pulse over some large period, we consider it as no flow */
-      if (meter->getCount() == 1)
-      {
-        lastPulseTime = currentTime;
-        noFlow = false;
-        startFlow = true;
-        return 0;
-      }
-      if (meter->getCount() == 0)
-      {
-        lastPulseTime = currentTime;
-        return 0;
-      }
-
-      /* if there was more than one pulse, we assume the first as the "unknown",
-       * so, it's deduced and the other are assumed to has happened since the last check */
-      pulses = meter->getAndResetCount() - 1;
-      noFlow = false;
-    }
-    else if (startFlow)
-    {
-      // estimate over more than a second
-      if (pulseTime < 1000)
-        return 0;
-      if (meter->getCount() == 0)
-      {
-        // single pulse over a minute is considered as no flow
-        if (pulseTime > 60000)
-          noFlow = true;
-        return 0;
-      }
-      pulses = meter->getAndResetCount();
-      startFlow = false;
+      msPerLiterHistory[historyCount] = {pulseTime, pulses};
+      historyCount++;
     }
     else
     {
-      /* default case, flow already started
-       * we want to round the value over some time to have more realistic average */
-      if (pulseTime < 3000)
-        return flowLPM;
-       pulses = meter->getAndResetCount();
+      msPerLiterHistory[historyIndex] = {pulseTime, pulses};
+      historyIndex = (historyIndex + 1) % HISTORY_SIZE;
     }
+
+    uint64_t totalPulseTime = 0, totalPulses = 0;
+    for (uint8_t i = 0; i < historyCount; i++)
+    {
+      totalPulseTime += msPerLiterHistory[i].first;
+      totalPulses += msPerLiterHistory[i].second;
+    }
+    return (totalPulseTime * PULSE_PER_LITER) / totalPulses;
+  }
+
+  uint32_t readValue(void) override
+  {
+    constexpr uint16_t SMOOTH_SCALE = 1000;
+    constexpr uint16_t ALPHA_SCALED = 700;      // alpha = 0.7
+    constexpr uint32_t INTERIM_DECAY_MS = 2000; // Decay after 2s
+    uint64_t currentTime = System.millis();
+    uint32_t pulseTime = currentTime - lastPulseTime;
+    uint32_t pulses = meter->getAndResetCount();
+
     lastPulseTime = currentTime;
 
-    flowLPM = pulses * 60 * 1000 / pulseTime;
-    noFlow = pulses == 0;
+    // Update noFlow timer
+    if (pulses == 0)
+    {
+      uint32_t dynamicTimeout = msPerLiter ? max(5000, 2 * msPerLiter / PULSE_PER_LITER) : 5000;
+      if (noPulseTimeMs >= dynamicTimeout)
+      {
+        noFlow = true;
+        msPerLiter = 0;
+        flowLPM = 0;
+        historyCount = 0;
+        historyIndex = 0;
+        return 0;
+      }
+      noPulseTimeMs += pulseTime;
+
+      // Provide interim flow estimate if flow is active
+      if (msPerLiter && noPulseTimeMs < INTERIM_DECAY_MS)
+      {
+        uint32_t interimFlowLPM = (60 * 1000) / msPerLiter;
+        flowLPM = (interimFlowLPM * ALPHA_SCALED + ((SMOOTH_SCALE - ALPHA_SCALED) * flowLPM)) / SMOOTH_SCALE;
+        return flowLPM;
+      }
+      // Force decay to 0 after INTERIM_DECAY_MS
+      flowLPM = (0 * ALPHA_SCALED + ((SMOOTH_SCALE - ALPHA_SCALED) * flowLPM)) / SMOOTH_SCALE;
+      return flowLPM;
+    }
+
+    noPulseTimeMs = 0;
+    bool startFlow = noFlow;
+    noFlow = false;
+
+    // the nature of the Water meter pulse is that it could be triggered with minimal water, not 1/10 of liter
+    // skip it, if previously no pulse was seen lately
+    if (startFlow)
+      pulses--;
+
+    if (pulses == 0)
+    {
+      // First pulse after noFlow: wait for second pulse
+      return 0;
+    }
+
+    msPerLiter = calcAverageMsPerLiter(pulseTime, pulses);
+
+    uint32_t instantFlowLPM = (60 * 1000) / msPerLiter;
+
+    // Apply exponential moving average
+    if (startFlow)
+    {
+      // First valid flow rate (after second pulse)
+      flowLPM = instantFlowLPM;
+    }
+    else
+    {
+      // Smooth subsequent flow rates
+      flowLPM = (instantFlowLPM * ALPHA_SCALED + ((SMOOTH_SCALE - ALPHA_SCALED) * flowLPM)) / SMOOTH_SCALE;
+    }
+
     return flowLPM;
   }
 
@@ -588,10 +627,16 @@ protected:
   }
 
 private:
+  static constexpr uint32_t PULSE_PER_LITER = 10;
   WaterMeter *meter;
   uint64_t lastPulseTime;
   uint32_t flowLPM;
-  bool noFlow, startFlow;
+  uint32_t msPerLiter;
+  uint32_t noPulseTimeMs;
+  bool noFlow;
+  std::pair<uint32_t, uint32_t> msPerLiterHistory[3];
+  uint8_t historyIndex;
+  uint8_t historyCount;
 };
 
 class Relay
