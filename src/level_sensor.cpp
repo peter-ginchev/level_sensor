@@ -425,17 +425,17 @@ public:
   {
     /* Pressure below designed high pressure keeps the pump on,
      * the pump will stop when pressure is high and the flow is very low */
-    if (lastPumpOn && pressure_mbar < 5000)
+    if (lastPumpOn && pressure_mbar < 4000)
       return SensorDecisionTriState::START;
 
     /* The pump will start just when there could be no time to spool the pump, w/o experiencing it,
      * Otherwise high flow rate will start it anyway, if 3.5bar won't be enough, could be raised to 4bar */
-    if (!lastPumpOn && pressure_mbar < 3500)
+    if (!lastPumpOn && pressure_mbar < 2500)
       return SensorDecisionTriState::START;
 
     /* There's a protection of high pressure, stop the pump in order to avoid damage, for example
      * the installed membrane tank max pressure could be as low as 8.6 bar */
-    if (pressure_mbar > 6000)
+    if (pressure_mbar > 5000)
       return SensorDecisionTriState::STOP;
 
     return SensorDecisionTriState::OK_TO_STOP;
@@ -714,7 +714,7 @@ private:
 
   static constexpr int HOUR_WINDOW_SIZE = 3600 * (1000 / DELAY_MS);
   static constexpr int WINDOW_SIZE = HOUR_WINDOW_SIZE / 3;  // 20 min look-back buffer
-  static constexpr int MIN_ON_TIME = 90000; // 90 seconds
+  static constexpr int MIN_ON_TIME = 30000; // 30 seconds
   static constexpr float HYST_THRESHOLD = 0.5; // the percentage of the WINDOW_SIZE time, if above the pump will stay on
   std::deque<int> historyBufer;         // Rolling window of decisions (0 or 1)
   std::deque<int> pumpOnInHourBuffer;   // Hour long Rolling window of turn on, used to count the on/off switches

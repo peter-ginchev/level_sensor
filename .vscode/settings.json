@@ -10,7 +10,7 @@
         "span": "cpp"
     },
     "particle.targetDevice": "particle_1",
-    "particle.firmwareVersion": "6.2.1",
+    "particle.firmwareVersion": "6.4.0",
     "particle.targetPlatform": "p2",
     "particle.debugWarningShown": true
 }
