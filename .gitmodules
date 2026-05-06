@@ -7,3 +7,9 @@
 [submodule "lib/PDLS_Common"]
 	path = lib/PDLS_Common
 	url = git@github.com:peter-ginchev/PDLS_Common.git
+[submodule "lib/Adafruit_ADS1X15/src"]
+	path = lib/Adafruit_ADS1X15/src
+	url = https://github.com/adafruit/Adafruit_ADS1X15.git
+[submodule "lib/Adafruit_BusIO/src"]
+	path = lib/Adafruit_BusIO/src
+	url = https://github.com/adafruit/Adafruit_BusIO.git
