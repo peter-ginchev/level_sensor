@@ -372,11 +372,13 @@ private:
 class WaterLevel: public SensorInterface
 {
 public:
-  WaterLevel(Display *display, unsigned screenLine, CurrentSensor *sensor)
+  WaterLevel(Display *display, unsigned screenLine, CurrentSensor *sensor, uint32_t calibrationMultiplier = 100)
   : SensorInterface(display, screenLine, "Level", "depth_mm")
     // hydrostatic pressure sensor connected to output 0,
-    // range 0-10m, 0-10000 received in mm
-  , sensor(sensor, 0, 0, 10000) { }
+    // range 0-10m (proximately), 0-1000 received in mbar
+  , sensor(sensor, 0, 0, 1000)
+  , calibrationMultiplier(calibrationMultiplier)
+  { }
 
   virtual SensorDecisionTriState decide(uint32_t level_mm, bool lastPumpOn) override
   {
@@ -389,7 +391,14 @@ public:
 protected:
   uint32_t readValue(void) override
   {
-    return sensor.read();
+    uint32_t mbar = (sensor.read() * calibrationMultiplier + 50) / 100;
+    return calc_in_mm(mbar);
+  }
+
+  uint32_t calc_in_mm(uint32_t mbar)
+  {
+    // Assuming water density of 0.9807 kg/L, 1mbar corresponds to 1.0197 mm of water column
+    return (mbar * 1019 + 500) / 100;
   }
 
   virtual String getText(uint32_t level_mm) override
@@ -410,32 +419,35 @@ protected:
 
 private:
   CurrentSensorChannel sensor;
+  uint32_t calibrationMultiplier;
 };
 
 class Pressure: public SensorInterface
 {
 public:
-  Pressure(Display *display, unsigned screenLine, CurrentSensor *sensor)
+  Pressure(Display *display, unsigned screenLine, CurrentSensor *sensor, int32_t calibrationAdditive = 0)
   : SensorInterface(display, screenLine, "Pressure", "pressure_mbar")
     // water pressure sensor connected to output 1,
     // range 0-6bar, 0-6000 received in mbar
-  , sensor(sensor, 1, 0, 6000) { }
+  , sensor(sensor, 1, 0, 6000)
+  , calibrationAdditive(calibrationAdditive)
+   { }
 
   virtual SensorDecisionTriState decide(uint32_t pressure_mbar, bool lastPumpOn) override
   {
     /* Pressure below designed high pressure keeps the pump on,
      * the pump will stop when pressure is high and the flow is very low */
-    if (lastPumpOn && pressure_mbar < 4000)
+    if (lastPumpOn && pressure_mbar < PUMP_OFF_PRESSURE)
       return SensorDecisionTriState::START;
 
     /* The pump will start just when there could be no time to spool the pump, w/o experiencing it,
      * Otherwise high flow rate will start it anyway, if 3.5bar won't be enough, could be raised to 4bar */
-    if (!lastPumpOn && pressure_mbar < 2500)
+    if (!lastPumpOn && pressure_mbar < PUMP_ON_PRESSURE)
       return SensorDecisionTriState::START;
 
     /* There's a protection of high pressure, stop the pump in order to avoid damage, for example
      * the installed membrane tank max pressure could be as low as 8.6 bar */
-    if (pressure_mbar > 5000)
+    if (pressure_mbar > PUMP_STOP_PRESSURE)
       return SensorDecisionTriState::STOP;
 
     return SensorDecisionTriState::OK_TO_STOP;
@@ -444,7 +456,8 @@ public:
 protected:
   uint32_t readValue(void) override
   {
-    return sensor.read();
+    int32_t calibrated = static_cast<int32_t>(sensor.read()) + calibrationAdditive;
+    return static_cast<uint32_t>(calibrated);
   }
 
   virtual String getText(uint32_t mbar) override
@@ -455,188 +468,150 @@ protected:
   }
 
 private:
+  static constexpr int PUMP_ON_PRESSURE = 2500; // cut-in pressure in mbar
+  static constexpr int PUMP_OFF_PRESSURE = 4000; // cut-out pressure in mbar
+  static constexpr int PUMP_STOP_PRESSURE = 5500; // emergency stop pressure in mbar
+
   CurrentSensorChannel sensor;
+  int32_t calibrationAdditive;
 };
 
 class WaterMeter
 {
 public:
-  WaterMeter(int pin)
-  {
-    pinMode(pin, INPUT_PULLUP);
-    attachInterrupt(pin, &WaterMeter::pulseInterrupt, this, FALLING);
-  }
-
-  uint32_t getAndResetCount(void)
-  {
-    return pulseCount.exchange(0);
-  }
-
-  uint32_t getCount(void)
-  {
-    return pulseCount.load();
-  }
-
-private:
-  static constexpr uint32_t DEBOUNCE_MS = 30;
-  volatile std::atomic_uint32_t pulseCount = 0;
-  uint64_t lastPulse = 0; // Note: used only inside an ATOMIC_BLOCK
-
-  void pulseInterrupt(void)
-  {
-    uint64_t currentTime = System.millis();
-
-    ATOMIC_BLOCK() {
-      if (currentTime - lastPulse < DEBOUNCE_MS)
-        return;
-      lastPulse = currentTime;
+    WaterMeter(int pin, Display *display)
+        : pin(pin), pulseCount(0), lastPulseTime(0), totalEdges(0)
+    {
+        pinMode(pin, INPUT_PULLUP);
+        pinSetDriveStrength(pin, DriveStrength::HIGH);
+        attachInterrupt(pin, [this]() { handleInterrupt(); }, FALLING);
+        statusLine = new DisplayLine(display, -3);
     }
 
-    pulseCount++;
-  }
+    uint32_t getAndResetCount() {
+        String debug = "Reed - P:" + String(getCount()) +
+                       " E:" + String(getTotalEdges()) +
+                       " Pin:" + (getRawPinState() ? "L" : "H") +
+                       " LP:" + String(lowPulse.load(std::memory_order_relaxed)) + "ms";
+
+        statusLine->setText(debug);
+        lowPulse.store(0, std::memory_order_relaxed);
+
+      return pulseCount.exchange(0, std::memory_order_relaxed);
+    }
+    uint32_t getCount() const { return pulseCount.load(); }
+
+    uint32_t getTotalEdges() { return totalEdges.exchange(0); }
+    bool     getRawPinState()  const { return digitalRead(pin) == LOW; }
+
+private:
+    static constexpr uint32_t DEBOUNCE_MS = 25;   // start very low
+
+    const int pin;
+    DisplayLine *statusLine;
+    std::atomic<uint32_t> pulseCount{0};
+    std::atomic<uint32_t> lastPulseTime{0};
+    std::atomic<uint32_t> totalEdges{0};
+    std::atomic<uint32_t> lowPulse{0};
+
+    void handleInterrupt()
+    {
+        totalEdges.fetch_add(1, std::memory_order_relaxed);
+
+        uint32_t now = System.millis();
+        auto lastTime = lastPulseTime.load(std::memory_order_relaxed);
+        if (now - lastTime < DEBOUNCE_MS)
+        {
+            lowPulse.store(now - lastTime, std::memory_order_relaxed);
+            return;
+        }
+
+        lastPulseTime.store(now, std::memory_order_relaxed);
+        pulseCount.fetch_add(1, std::memory_order_relaxed);
+    }
 };
 
 class FlowRate : public SensorInterface
 {
 public:
-  FlowRate(Display *display, unsigned screenLine, WaterMeter *meter)
-  : SensorInterface(display, screenLine, "Flow", "flow_lpm")
-  , meter(meter)
-  , lastPulseTime(System.millis())
-  , flowLPM(0)
-  , msPerLiter(0)
-  , noPulseTimeMs(0)
-  , noFlow(true)
-  , historyIndex(0)
-  , historyCount(0)
-  {
-    meter->getAndResetCount();
-  }
+    FlowRate(Display *display, unsigned screenLine, WaterMeter *meter)
+        : SensorInterface(display, screenLine, "Flow", "flow_lpm")
+        , meter(meter)
+        , lastPulseTime(0)
+        , flowLPM(0.0f)
+        , noFlow(true)
+    {
+        meter->getAndResetCount();
+    }
 
-  virtual SensorDecisionTriState decide(uint32_t flowLPM, bool lastPumpOn) override
-  {
-    /* Flow rate starts the pump, immediately after there's a significant flow,
-     * the pump is expected to stop, when the flow is low and the pressure has built up */
-    if (flowLPM > 12)
-      return SensorDecisionTriState::START;
-    return SensorDecisionTriState::OK_TO_STOP;
-  }
+    virtual SensorDecisionTriState decide(uint32_t currentFlowLPM, bool lastPumpOn) override
+    {
+      /* Flow rate starts the pump, immediately after there's a significant flow,
+       * the pump is expected to stop, when the flow is low and the pressure has built up */
+      if (flowLPM > 12)
+        return SensorDecisionTriState::START;
+      return SensorDecisionTriState::OK_TO_STOP;
+    }
 
 protected:
-  uint32_t calcAverageMsPerLiter(uint32_t pulseTime, uint32_t pulses)
-  {
-    constexpr uint8_t HISTORY_SIZE = 3;
-    if (historyCount < HISTORY_SIZE)
+    uint32_t readValue() override
     {
-      msPerLiterHistory[historyCount] = {pulseTime, pulses};
-      historyCount++;
-    }
-    else
-    {
-      msPerLiterHistory[historyIndex] = {pulseTime, pulses};
-      historyIndex = (historyIndex + 1) % HISTORY_SIZE;
-    }
+        constexpr uint32_t PULSES_PER_LITER = 10;
+        constexpr float    SMOOTH_ALPHA     = 0.65f;
+        constexpr uint32_t NO_FLOW_TIMEOUT_MS = 5000;
 
-    uint64_t totalPulseTime = 0, totalPulses = 0;
-    for (uint8_t i = 0; i < historyCount; i++)
-    {
-      totalPulseTime += msPerLiterHistory[i].first;
-      totalPulses += msPerLiterHistory[i].second;
-    }
-    return (totalPulseTime * PULSE_PER_LITER) / totalPulses;
-  }
+        uint32_t now = System.millis();
+        uint32_t pulses = meter->getAndResetCount();
 
-  uint32_t readValue(void) override
-  {
-    constexpr uint16_t SMOOTH_SCALE = 1000;
-    constexpr uint16_t ALPHA_SCALED = 700;      // alpha = 0.7
-    constexpr uint32_t INTERIM_DECAY_MS = 2000; // Decay after 2s
-    uint64_t currentTime = System.millis();
-    uint32_t pulseTime = currentTime - lastPulseTime;
-    uint32_t pulses = meter->getAndResetCount();
+        if (pulses == 0)
+        {
+            if (noFlow)
+                return (uint32_t)(flowLPM * 10);   // keep last value for display
 
-    lastPulseTime = currentTime;
+            if ((now - lastPulseTime) > NO_FLOW_TIMEOUT_MS)
+            {
+                noFlow = true;
+                flowLPM = 0.0f;
+                return 0;
+            }
 
-    // Update noFlow timer
-    if (pulses == 0)
-    {
-      uint32_t dynamicTimeout = msPerLiter ? max(5000, 2 * msPerLiter / PULSE_PER_LITER) : 5000;
-      if (noPulseTimeMs >= dynamicTimeout)
-      {
-        noFlow = true;
-        msPerLiter = 0;
-        flowLPM = 0;
-        historyCount = 0;
-        historyIndex = 0;
-        return 0;
-      }
-      noPulseTimeMs += pulseTime;
+            flowLPM *= 0.88f;   // gentle decay
+            return (uint32_t)(flowLPM * 10);
+        }
 
-      // Provide interim flow estimate if flow is active
-      if (msPerLiter && noPulseTimeMs < INTERIM_DECAY_MS)
-      {
-        uint32_t interimFlowLPM = (60 * 1000) / msPerLiter;
-        flowLPM = (interimFlowLPM * ALPHA_SCALED + ((SMOOTH_SCALE - ALPHA_SCALED) * flowLPM)) / SMOOTH_SCALE;
-        return flowLPM;
-      }
-      // Force decay to 0 after INTERIM_DECAY_MS
-      flowLPM = (0 * ALPHA_SCALED + ((SMOOTH_SCALE - ALPHA_SCALED) * flowLPM)) / SMOOTH_SCALE;
-      return flowLPM;
+        // New pulses arrived
+        uint32_t deltaMs = (lastPulseTime == 0) ? 1000 : (now - lastPulseTime);
+        lastPulseTime = now;
+
+        if (noFlow)
+        {
+            noFlow = false;
+            return 0;   // wait for second pulse
+        }
+
+        // Calculate flow
+        float liters = (float)pulses / PULSES_PER_LITER;
+        float instantLPM = (60000.0f * liters) / deltaMs;
+
+        // Smoothing
+        flowLPM = instantLPM * SMOOTH_ALPHA + flowLPM * (1.0f - SMOOTH_ALPHA);
+
+        return (uint32_t)(flowLPM * 10);   // return value ×10 for 1 decimal place
     }
 
-    noPulseTimeMs = 0;
-    bool startFlow = noFlow;
-    noFlow = false;
-
-    // the nature of the Water meter pulse is that it could be triggered with minimal water, not 1/10 of liter
-    // skip it, if previously no pulse was seen lately
-    if (startFlow)
-      pulses--;
-
-    if (pulses == 0)
+    virtual String getText(uint32_t value) override
     {
-      // First pulse after noFlow: wait for second pulse
-      return 0;
+        char buf[12];
+        float displayFlow = value / 10.0f;
+        snprintf(buf, sizeof(buf), "%4.1f L/min", displayFlow);
+        return buf;
     }
-
-    msPerLiter = calcAverageMsPerLiter(pulseTime, pulses);
-
-    uint32_t instantFlowLPM = (60 * 1000) / msPerLiter;
-
-    // Apply exponential moving average
-    if (startFlow)
-    {
-      // First valid flow rate (after second pulse)
-      flowLPM = instantFlowLPM;
-    }
-    else
-    {
-      // Smooth subsequent flow rates
-      flowLPM = (instantFlowLPM * ALPHA_SCALED + ((SMOOTH_SCALE - ALPHA_SCALED) * flowLPM)) / SMOOTH_SCALE;
-    }
-
-    return flowLPM;
-  }
-
-  // we are using the stored value, instead of the parameter, the value is the same
-  virtual String getText(uint32_t) override
-  {
-    char output[10] = {};
-    snprintf(output, sizeof(output) - 1, "%2ld L/min", flowLPM);
-    return output;
-  }
 
 private:
-  static constexpr uint32_t PULSE_PER_LITER = 10;
-  WaterMeter *meter;
-  uint64_t lastPulseTime;
-  uint32_t flowLPM;
-  uint32_t msPerLiter;
-  uint32_t noPulseTimeMs;
-  bool noFlow;
-  std::pair<uint32_t, uint32_t> msPerLiterHistory[3];
-  uint8_t historyIndex;
-  uint8_t historyCount;
+    WaterMeter *meter;
+    uint64_t lastPulseTime;
+    float    flowLPM;
+    bool     noFlow;
 };
 
 class Relay
@@ -714,7 +689,7 @@ private:
 
   static constexpr int HOUR_WINDOW_SIZE = 3600 * (1000 / DELAY_MS);
   static constexpr int WINDOW_SIZE = HOUR_WINDOW_SIZE / 3;  // 20 min look-back buffer
-  static constexpr int MIN_ON_TIME = 30000; // 30 seconds
+  static constexpr int MIN_ON_TIME = 45000; // minimum run time of 45 seconds
   static constexpr float HYST_THRESHOLD = 0.5; // the percentage of the WINDOW_SIZE time, if above the pump will stay on
   std::deque<int> historyBufer;         // Rolling window of decisions (0 or 1)
   std::deque<int> pumpOnInHourBuffer;   // Hour long Rolling window of turn on, used to count the on/off switches
@@ -834,6 +809,8 @@ void setup(void)
   Log.info("Setup..");
   Serial.begin(9600);
 
+  WiFi.selectAntenna(ANT_EXTERNAL);
+
   currentSensor = new CurrentSensor();
   display = new Display(&epdDriver);
 
@@ -841,13 +818,13 @@ void setup(void)
   pumpRelay = new Relay(S4);
 
   // Lower pull-up resistance is better
-  reedSensor = new WaterMeter(D10);
+  reedSensor = new WaterMeter(D10, display);
 
   displayTime = new DisplayTime(display);
   pumpControl = new PumpControl(display, pumpRelay);
 
-  pumpControl->registerSensor(new WaterLevel(display, 1, currentSensor));
-  pumpControl->registerSensor(new Pressure(display, 2, currentSensor));
+  pumpControl->registerSensor(new WaterLevel(display, 1, currentSensor, 117)); // calibrated to the reading on the display, 100 is 1
+  pumpControl->registerSensor(new Pressure(display, 2, currentSensor, -130)); // calibrated to -0.13 bar offset
   pumpControl->registerSensor(new FlowRate(display, 3, reedSensor));
 }
 
