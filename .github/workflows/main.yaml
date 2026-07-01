@@ -20,6 +20,15 @@ jobs:
         with:
           submodules: 'true'
 
+      # The vendored libraries (notably the Adafruit submodules) ship their upstream
+      # examples inside compiled 'src/' paths. Particle's buildpack compiles every
+      # source it finds under src/ and lib/*/src/, so those examples get built too and
+      # some fail to compile. They are irrelevant to this firmware, so strip them
+      # before compiling. (particle.ignore/particle.include are legacy and no longer
+      # honored, so this is done here instead.)
+      - name: Strip library examples and tests
+        run: |
+          find lib -depth -type d \( -name examples -o -name test -o -name tests \) -exec rm -rf {} +
 
       # Particle Compile Action
       - name: Compile Firmware

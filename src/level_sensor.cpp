@@ -12,8 +12,10 @@
 PRODUCT_VERSION(1);
 
 #include <list>
+#include <vector>
 #include <deque>
 #include <numeric>
+#include <algorithm>
 #include <atomic>
 #include <functional>
 
@@ -241,7 +243,7 @@ public:
     if (Particle.connected())
     {
       char str[10] = {};
-      snprintf(str, 9, "%lld", sum / samples_count);
+      snprintf(str, 9, "%llu", sum / samples_count);
       transmitted = Particle.publish(name, str);
     }
 
@@ -457,6 +459,11 @@ protected:
   uint32_t readValue(void) override
   {
     int32_t calibrated = static_cast<int32_t>(sensor.read()) + calibrationAdditive;
+    // Clamp: a raw reading below the calibration offset (sensor noise near zero or
+    // a disconnected sensor) would otherwise underflow to a huge value and trip the
+    // emergency high-pressure STOP.
+    if (calibrated < 0)
+      return 0;
     return static_cast<uint32_t>(calibrated);
   }
 
@@ -642,8 +649,7 @@ public:
     statusLine = new DisplayLine(display, -2);
     setOff();
 
-    // Initialize buffer with zeros (pump "off" decisions)
-    historyBufer.resize(WINDOW_SIZE, 0);
+    // Initialize buffer with zeros (no starts yet)
     pumpOnInHourBuffer.resize(HOUR_WINDOW_SIZE, 0);
   }
 
@@ -688,18 +694,62 @@ private:
   Relay *relay;
 
   static constexpr int HOUR_WINDOW_SIZE = 3600 * (1000 / DELAY_MS);
-  static constexpr int WINDOW_SIZE = HOUR_WINDOW_SIZE / 3;  // 20 min look-back buffer
   static constexpr int MIN_ON_TIME = 45000; // minimum run time of 45 seconds
-  static constexpr float HYST_THRESHOLD = 0.5; // the percentage of the WINDOW_SIZE time, if above the pump will stay on
-  std::deque<int> historyBufer;         // Rolling window of decisions (0 or 1)
-  std::deque<int> pumpOnInHourBuffer;   // Hour long Rolling window of turn on, used to count the on/off switches
-  bool pumpState;                       // Current pump state (true = on, false = off)
-  uint64_t lastOnMs;                    // Time pump was last turned on
 
-  // Calculate fraction of "on" decisions in history buffer
-  double calculateHysteresisMetric() const {
-      auto sum = std::accumulate(historyBufer.begin(), historyBufer.end(), 0);
-      return static_cast<double>(sum) / historyBufer.size();
+  /* Anti-short-cycle hysteresis (graduated, recency-weighted).
+   *
+   * Goal: keep pump starts at/under ~20 per hour without ever withholding water.
+   * We keep a rolling one-hour history of starts and score it with a recency
+   * weight -- a start "now" counts ~1, one an hour ago counts ~0. The more (and
+   * the more recently) the pump has been starting, the longer we are willing to
+   * "bridge" a gap by keeping an already-running pump on past the point it would
+   * otherwise stop:
+   *
+   *   extra  = weightedRecentStarts - HYST_BRIDGE_FLOOR
+   *   bridge = clamp(extra * HYST_MS_PER_START, 0, HYST_MAX_BRIDGE_MS)
+   *
+   * So an isolated long run (a single recent start) scores ~0 and is never bridged
+   * -- it just stops -- while genuine short-cycling earns up to HYST_MAX_BRIDGE_MS
+   * of extension. Real demand always keeps the pump on via decide()==START, and
+   * the 5.5 bar emergency stop remains the hard pressure backstop. */
+  static constexpr uint64_t HYST_MAX_BRIDGE_MS = 120000; // max bridge (extension) time, 2 min
+  static constexpr double   HYST_BRIDGE_FLOOR  = 3.0;    // recency-weighted starts below this -> no bridging
+  static constexpr uint64_t HYST_MS_PER_START  = 20000;  // bridge time earned per weighted start above the floor
+
+  std::deque<int> pumpOnInHourBuffer;   // Hour long rolling window of starts (1 per off->on edge)
+  bool pumpState = false;               // Current pump state (true = on, false = off)
+  uint64_t lastOnMs = 0;                // Time pump was last turned on
+  uint64_t bridgeSinceMs = 0;           // When the current bridge/extension started (0 = not bridging)
+  int startsLastHour = 0;               // Unweighted starts in the trailing hour (for display)
+
+  // Recency-weighted count of starts in the trailing hour: a start "now" weighs
+  // ~1, one an hour ago ~0. Captures whether the pump is short-cycling *recently*.
+  double weightedRecentStarts(void) const
+  {
+    size_t n = pumpOnInHourBuffer.size();
+    if (n < 2)
+      return 0.0;
+
+    double sum = 0.0;
+    size_t idx = 0;
+    for (int started : pumpOnInHourBuffer)
+    {
+      if (started)
+        sum += static_cast<double>(idx) / (n - 1); // front = oldest (~0), back = newest (~1)
+      ++idx;
+    }
+    return sum;
+  }
+
+  // How long we're currently willing to keep an already-running pump on past its
+  // natural stop, scaled by how much (and how recently) it has been short-cycling.
+  uint64_t allowedBridgeMs(void) const
+  {
+    double extra = weightedRecentStarts() - HYST_BRIDGE_FLOOR;
+    if (extra <= 0.0)
+      return 0;
+    uint64_t ms = static_cast<uint64_t>(extra * HYST_MS_PER_START);
+    return ms < HYST_MAX_BRIDGE_MS ? ms : HYST_MAX_BRIDGE_MS;
   }
 
   void setOn(void)
@@ -734,36 +784,45 @@ private:
     }
     pumpLastOn = pumpState;
 
-    int onCounter = std::accumulate(pumpOnInHourBuffer.begin(), pumpOnInHourBuffer.end(), 0);
+    startsLastHour = std::accumulate(pumpOnInHourBuffer.begin(), pumpOnInHourBuffer.end(), 0);
     snprintf(output, sizeof(output) - 1, "ON counter: %2d, run: %3d:%02d",
-                                         onCounter, lastRunTimeSecs / 60, lastRunTimeSecs % 60);
+                                         startsLastHour, lastRunTimeSecs / 60, lastRunTimeSecs % 60);
     statusLine->setText(output);
   }
 
   void setPump(bool on, bool force=false)
   {
     bool keepOn;
-    String onReason;
+    String onReason = "time";
 
     countOnTimes();
-    if (!force)
-    {
-      keepOn = decideKeepOn(on);
-      onReason = "time";
-    }
-    else
+
+    if (force)
       keepOn = on;
+    else
+      keepOn = decideKeepOn(on);
 
-    // Update hysteresis look-back
-    historyBufer.pop_front();
-    historyBufer.push_back(keepOn ? 1 : 0);
-
-    if (!force && !keepOn)
+    if (!force && !keepOn && pumpState)
     {
-      // Keep on if decision is off and hysteresis metric is above threshold
-      keepOn = calculateHysteresisMetric() >= HYST_THRESHOLD;
-      onReason = "hist";
+      // Raw decision is OFF, the minimum run time is satisfied, and the pump is
+      // currently running. Bridge the gap only as long as recent short-cycling
+      // justifies -- a graduated extension (see allowedBridgeMs) measured from the
+      // moment the pump would have stopped, capped at HYST_MAX_BRIDGE_MS. An
+      // isolated long run earns ~no bridge and stops. Only ever extends an
+      // already-running pump; real restarts come from decide()==START.
+      if (bridgeSinceMs == 0)
+        bridgeSinceMs = System.millis();
+
+      if ((System.millis() - bridgeSinceMs) < allowedBridgeMs())
+      {
+        keepOn = true;
+        onReason = "hist";
+      }
     }
+
+    // Reset the bridge timer when real demand returns, or once the pump stops.
+    if (on || !keepOn)
+      bridgeSinceMs = 0;
 
     relay->set(keepOn);
     pumpState = keepOn;
